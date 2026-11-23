@@ -18,4 +18,6 @@ def native_family(name: str = "legacy") -> NativeFamily:
     if name == "mainline-support":
         return NativeFamily(name, PACKAGE_NATIVE_ROOT / "families" / "mainline_support",
                             "mainline-b12611")
+    if name == "mainline-vulkan":
+        return NativeFamily(name, PACKAGE_NATIVE_ROOT / "families" / "mainline_vulkan", "mainline-b12611")
     raise ValueError(f"unknown native backend family: {name}")

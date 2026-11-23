@@ -28,6 +28,7 @@ MODULES = (
     "tests.test_reasoning_decision_budget",
     "tests.test_reasoning_final_budget",
     "tests.test_native_family_isolation",
+    "tests.test_intel_gpu_choice",
 )
 
 

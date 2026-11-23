@@ -91,7 +91,7 @@ def validate_chat_bridge_artifact(build_bin: Path, bridge_path: Path) -> dict[st
     libraries = build.get("libraries")
     if not isinstance(libraries, dict):
         raise RuntimeError("missing Orbit chat bridge library identity")
-    for name in platform_runtime_libs():
+    for name in (*platform_runtime_libs(), *(("libggml-vulkan.so",) if "libggml-vulkan.so" in libraries else ())):
         expected = libraries.get(name)
         path = build_bin / name
         if not isinstance(expected, str) or not path.exists() or _sha256(path) != expected:
@@ -129,7 +129,7 @@ def _build_identity(
         "source_inputs": {name: _sha256(path) for name, path in inputs.items() if path.exists()},
         "libraries": {
             name: _sha256(build_bin / name)
-            for name in platform_runtime_libs()
+            for name in (*platform_runtime_libs(), "libggml-vulkan.so")
             if (build_bin / name).exists()
         },
     }

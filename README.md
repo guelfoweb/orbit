@@ -1,6 +1,6 @@
 # Orbit
 
-Orbit is a Python local-AI runtime for CPU-only machines. It combines local
+Orbit is a Python local-AI runtime with CPU execution by default. It combines local
 chat, model-selected tools, file workflows and static artifact analysis in a
 terminal client. Linux x86_64 is the qualified platform.
 
@@ -242,3 +242,37 @@ applicable criteria.
 The [tool-intent qualification gate](docs/TOOL_INTENT_QUALIFICATION.md) checks
 24 frozen bilingual intents with tool execution intercepted. Its retained-response
 replay runs offline and emits JSON and Markdown capability results.
+
+## Optional Intel GPU execution
+
+CPU remains the default. Inkling's mainline text backend also has an optional,
+experimental Intel integrated GPU variant using Vulkan. It is built separately;
+selecting GPU never substitutes a CPU backend silently. Other model families
+continue to use CPU. MTP and multimodal input are unavailable in this variant.
+
+Build dependencies include Vulkan development files, SPIR-V headers, and a
+`glslc` compiler supporting `GL_EXT_integer_dot_product`. Older distribution
+compilers may not support that feature; select a newer one explicitly:
+
+```bash
+python3 scripts/build_native.py --family mainline-vulkan --glslc /path/to/glslc
+orbit server --model-id inkling2-mini-ud-q4-k-m --accelerator intel-gpu
+```
+
+Use `--accelerator cpu` or omit the flag for CPU. The server reports the actual
+device and assigned GPU layers in `/props` under `acceleration`. Startup fails
+if no integrated Intel Vulkan device or no GPU-assigned layers are available.
+GPU host defaults are one inference thread and one batch thread; the process
+prefers two available efficient cores on hybrid CPUs. This profile does not
+borrow CPU calibration or the CPU-only aligned-prefix checkpoint policy.
+
+The local GUI offers **CPU (default)** and **Intel GPU (experimental)** beside
+each available model. Changing the device restarts the GUI-owned server and
+starts a new chat, preserving the old saved conversation. A failed startup
+attempt restores the previous owned selection when possible. Externally
+started servers remain under their operator's control.
+
+The Vulkan source is a hash-bound overlay on the mainline source, with its own
+build directory, libraries, source and patchset identities. CPU sources and
+libraries are preserved. GPU speed depends on the device and workload; model
+identity recognition does not extend CPU tool/ANALYSIS qualification to GPU.

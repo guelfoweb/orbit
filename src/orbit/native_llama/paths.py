@@ -35,6 +35,7 @@ class NativeLlamaPaths:
     fallback_reason: str | None = None
     model_id: str = DEFAULT_MODEL_ID
     abi_profile: str = "legacy"
+    accelerator: str = "cpu"
 
 
 def resolve_paths(
@@ -45,9 +46,11 @@ def resolve_paths(
     mmproj: Path | None = None,
     models_dir: Path | None = None,
     hf_cache: Path | None = None,
+    accelerator: str = "cpu",
 ) -> NativeLlamaPaths:
     manifest = get_manifest(model_id)
-    family = native_family(manifest.native_family)
+    from .acceleration import selected_family
+    family = native_family(selected_family(manifest.native_family, accelerator))
     if family.name != "legacy" and mmproj is not None:
         raise ValueError("isolated mainline family supports text-only models")
     source_root = (_resolve_build_source_root(llama_root) if family.name == "legacy"
@@ -74,6 +77,7 @@ def resolve_paths(
         fallback_reason=resolved.fallback_reason,
         model_id=manifest.id,
         abi_profile=family.abi_profile,
+        accelerator=accelerator,
     )
 
 
@@ -82,6 +86,7 @@ def resolve_legacy_paths(
     llama_root: Path | None = DEFAULT_LLAMA_ROOT,
     model: Path,
     mmproj: Path | None = None,
+    accelerator: str = "cpu",
 ) -> NativeLlamaPaths:
     resolved_model = model.expanduser().resolve()
 
@@ -96,7 +101,8 @@ def resolve_legacy_paths(
                                 if m.profile_id == profile.profile_id), "legacy")
     except (OSError, ValueError):
         pass
-    family = native_family(family_name)
+    from .acceleration import selected_family
+    family = native_family(selected_family(family_name, accelerator))
     source_root = (_resolve_build_source_root(llama_root) if family.name == "legacy"
                    else family.root / "source" / "llama.cpp")
     _runtime_llama_root, build_bin, library = _resolve_native_runtime(llama_root, family_name=family.name)
@@ -119,6 +125,7 @@ def resolve_legacy_paths(
         fallback_reason="legacy-model-path",
         model_id=LEGACY_MODEL_ID,
         abi_profile=family.abi_profile,
+        accelerator=accelerator,
     )
 
 

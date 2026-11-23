@@ -37,6 +37,7 @@ from orbit.native_server.server_profile import (
     thread_candidates,
     QualifiedStartupProfile,
     Resolution,
+    ServerProfile,
     detect_topology,
     qualified_startup_profile,
     render_profile_lines,
@@ -464,6 +465,7 @@ class OrbitNativeServer:
             "batch_size": self.client.config.batch_size,
             "ubatch_size": self.client.config.ubatch_size,
             "parallel_slots": 1,
+            "acceleration": dict(getattr(self.client, "_acceleration_status", {"requested": "cpu", "active": "cpu", "device": "CPU", "offloaded_layers": 0})),
             "reasoning_effort_levels": list(self.client.supported_reasoning_effort_levels()) if isinstance(self.client, NativeLlamaClient) else [],
             "thinking_mode": "on" if self.client.config.thinking else "off",
         }
@@ -624,6 +626,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                     "mtp_failure_reason": session["mtp_failure_reason"],
                     "model_id": state.client.paths.model_id,
                     "backend": "orbit-native",
+                    "acceleration": runtime["acceleration"],
                     "orbit_build": PROCESS_BUILD_IDENTITY.to_dict(),
                     # This protocol version rejects unsupported required grammars.
                     "required_tool_decoding": True,
@@ -1096,6 +1099,8 @@ def _qualified_startup_profile(args) -> "QualifiedStartupProfile | None":
     nothing here may raise -- an unidentifiable model simply gets no
     qualified tier.
     """
+    if getattr(args, "accelerator", "cpu") != "cpu":
+        return None
     model_id = getattr(args, "model_id", None)
     if not model_id:
         return None
@@ -1147,6 +1152,15 @@ def _resolve_startup_profile(
     of the same start, so preview, start and the post-load re-resolution never
     disagree and the GGUF is inspected once; None means no tier applies.
     """
+    if getattr(args, 'accelerator', 'cpu') == 'intel-gpu':
+        values = {key: getattr(args, key, None) for key in ('threads', 'threads_batch', 'batch', 'ubatch')}
+        defaults = dict(threads=1, threads_batch=1, batch=256, ubatch=128)
+        chosen = {key: defaults[key] if value is None else value for key, value in values.items()}
+        if any(value <= 0 for value in chosen.values()):
+            raise ValueError('GPU server parameters must be positive')
+        return Resolution(ServerProfile(**chosen, cache_ram_mib=0, source='intel-gpu',
+            field_sources={k: 'cli' if v is not None else 'intel-gpu' for k, v in values.items()}),
+            fingerprint='intel-gpu-no-cpu-calibration', cache_path=None, calibrated=True)
     if model_identity is None:
         model_identity, model_bytes = _model_identity_for_profile(args)
     else:
@@ -1251,7 +1265,11 @@ def _show_profile(args) -> int:
     print(f"ctx: {ctx_tokens} ({ctx_source})")
     for line in render_profile_lines(preview):
         print(line)
-    if missing:
+    if getattr(args, 'accelerator', 'cpu') == 'intel-gpu':
+        print('note: Intel GPU uses an explicit GPU profile; CPU calibration is not used')
+        if missing:
+            print('note: the model is not present locally; normal startup downloads it')
+    elif missing:
         print("note: this model is not present locally; the values above are a "
               "heuristic preview -- normal startup downloads it and calibrates once")
     elif getattr(args, "recalibrate", False):
@@ -1353,6 +1371,10 @@ def run_server(argv: list[str] | None = None, *, research_admission=None) -> int
     paths: NativeLlamaPaths | None = None
     try:
         paths = resolve_bootstrap_paths(args)
+        if getattr(args, 'accelerator', 'cpu') == 'intel-gpu':
+            from orbit.native_llama.acceleration import configure_gpu_host
+            host_cpus = configure_gpu_host()
+            _startup_note(f'Intel GPU: host CPUs {host_cpus or "scheduler default"}')
         # CPU weight-repack resolution lives in the backend-invocation layer:
         # explicit --repack beats ORBIT_CPU_REPACK beats the qualified
         # per-(machine, model) default beats the backend default. Only the
@@ -1374,6 +1396,7 @@ def run_server(argv: list[str] | None = None, *, research_admission=None) -> int
             paths,
             NativeClientConfig(
                 context_tokens=args.ctx,
+                gpu_layers=-1 if getattr(args, "accelerator", "cpu") == "intel-gpu" else 0,
                 threads=profile.threads,
                 threads_batch=profile.threads_batch,
                 batch_size=profile.batch,
@@ -1804,6 +1827,7 @@ def build_parser() -> argparse.ArgumentParser:
             "orbit/native_llama/vendor/lib, then ORBIT_LLAMA_LIB_DIR, then ORBIT_LLAMA_ROOT."
         ),
     )
+    parser.add_argument("--accelerator", choices=("cpu", "intel-gpu"), default="cpu", help="Inference device; CPU is the default. Intel GPU uses the isolated Vulkan backend.")
     parser.add_argument("--model-id", default=None, help=f"Orbit model id. Defaults to {DEFAULT_MODEL_ID} when --model is not used.")
     parser.add_argument("--model", type=Path, help="Legacy direct target model path override.")
     parser.add_argument("--mmproj", type=Path, help="Optional multimodal projector override for native image/audio support.")
@@ -1863,12 +1887,14 @@ def resolve_bootstrap_paths(args: argparse.Namespace) -> NativeLlamaPaths:
             mmproj=args.mmproj,
             models_dir=args.models_dir,
             hf_cache=args.hf_cache,
+            accelerator=getattr(args, "accelerator", "cpu"),
         )
     if args.model is not None:
-        return resolve_legacy_paths(llama_root=args.llama_root, model=args.model, mmproj=args.mmproj)
+        return resolve_legacy_paths(llama_root=args.llama_root, model=args.model, mmproj=args.mmproj, accelerator=getattr(args, "accelerator", "cpu"))
     return resolve_paths(
         llama_root=args.llama_root,
         model_id=DEFAULT_MODEL_ID,
+        accelerator=getattr(args, "accelerator", "cpu"),
         mmproj=args.mmproj,
         models_dir=args.models_dir,
         hf_cache=args.hf_cache,
