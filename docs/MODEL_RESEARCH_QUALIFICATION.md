@@ -189,6 +189,41 @@ No cache profile, snapshot policy, prompt identity, native library or MTP settin
 is changed by this budget fix. Diagnostic evidence is retained under
 `workdir/diag/inkling_final_budget_cache_1/`.
 
+## Inkling aligned prefill checkpoint
+
+A later speed follow-up adds one bounded native sequence checkpoint for the
+verified `orbit-inkling2-mini-native-v1` profile. Eligibility is deliberately
+narrow: CPU/text, ctx8192, threads6/6, batch256, ubatch128, progress_step64,
+repack off, low-memory off, thinking off, native CHAT prompt mode (without a
+native tools payload), and all MTP/probe modes off. Other
+profiles retain their existing cache policies. `ORBIT_ALIGNED_PREFIX_REUSE=0`
+is the opt-out; invalid values also disable it.
+
+Capture occurs only from cold prefill at token 1024, on the unchanged 64-token
+decode boundary. No generated token enters the checkpoint. Restore requires a
+longer prompt and exact first-1024 token equality, plus the model/profile,
+template, metadata, native binary, full configuration, context pointer, session
+and reset identity. At least one suffix token is evaluated to refresh logits.
+Existing prefix/rolling strategies take precedence. Partial resident append
+cannot capture a differently segmented state; short intervening finals preserve
+the checkpoint. This is inference-state reuse, not answer caching or evidence
+selection.
+
+Only one snapshot is held, capped at 256 MiB before allocation; the measured Q4
+state is 205,187,404 bytes. Capture and restore temporarily require another copy.
+Reset, close, cancellation (including idle cancel), completion errors and
+ineligible mode/configuration release it. An unavailable identity uses ordinary
+prefill. Partial or failed native restore invalidates the snapshot and clears
+physical memory before normal fallback; committed tokens are published only
+after successful restore. No native library, prompt, parser, budget or MTP
+algorithm changes are involved.
+
+Native equivalence and timing evidence, source regression and fault mutations
+are retained in `workdir/diag/inkling_cache_speed_1/`. Timing depends on prompt
+length, shared-prefix length, output length and host load. First requests and
+short prompts retain their cold cost; model reasoning and decode speed are
+unchanged. This does not extend model or ANALYSIS semantic qualification.
+
 ## GUI conversation turn ownership
 
 `ChatRuntime` accepts an optional keyword-only `user_turn_namespace` containing

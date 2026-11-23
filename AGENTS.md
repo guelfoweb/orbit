@@ -211,6 +211,42 @@ These dispositions carry forward ORBIT-TODO-PRIORITY-AUDIT-1 and the subsequent
   MTP, prompt tuning or fabricated reuse was introduced. Evidence and scope:
   `workdir/diag/inkling_final_budget_cache_1/`.
 
+### Inkling repeated-prefill speed follow-up (2026-11-23)
+
+- A bounded aligned prefill checkpoint is enabled only for the verified Inkling
+  Q4 profile, exact qualified CPU config (ctx8192, threads6/6, batch256,
+  ubatch128, progress_step64, repack off), low-memory off, native CHAT prompt
+  mode, thinking off and all MTP/probes off. Other profiles and existing
+  prefix/rolling policies retain their behavior. `ORBIT_ALIGNED_PREFIX_REUSE=0`
+  disables it; invalid values also disable safely.
+- One cold checkpoint at token 1024 uses the unchanged 64-token batch boundary.
+  Restore requires exact first-1024 tokens and complete context/model/template/
+  metadata/native/config/session/reset identity, then evaluates the suffix to
+  refresh logits. Partial resident append cannot capture. Reset, close, cancel,
+  completion errors and ineligible mode discard it; failed or partial restore
+  clears native memory before ordinary cold fallback. Short intervening finals preserve it.
+  The measured snapshot is 205,187,404 bytes, bounded at 256 MiB before allocation,
+  with one additional temporary copy. No answers or checkpoints are persisted.
+- Three native cold/restore comparisons retained byte-identical full-vocabulary
+  prefill logits and identical 24-token generated sequences, including changed
+  tails and a short interleaved request. Dell prefill observations were
+  61.95/63.45/63.19 seconds cold versus 6.54/6.22/6.29 restored; decode was
+  unchanged within run noise. These are prompt/host/run-specific observations,
+  not a universal answer-speed claim. First requests and short prompts remain
+  cold; reasoning behavior, prompts, budgets and native libraries are unchanged.
+- An isolated local GUI completed three tools-on, thinking-off capital questions:
+  Paris 80.48s/cached0, Berlin 20.96s/cached1024, Rome 22.05s/cached1024, all stop,
+  with zero tools/retries/repairs. Different answer lengths prevent treating
+  these as a matched end-to-end benchmark. The user GUI was not used for probes.
+- Source-fresh checks: 261 focused tests, 411 artifact-free core tests/zero skips,
+  22 local GUI tests and 10 applied/caught mutations. Independent source/delta
+  review: BLOCKER 0 / MAJOR 0 / MINOR 0. The accepted full run passed
+  **6649 tests / 47 skips / RC=0**. The initial 32 source-extraction harness
+  errors were rejected; their tests remain unchanged after isolating the block. No new model/ANALYSIS semantic
+  qualification or MTP claim is made. Contract:
+  `docs/MODEL_RESEARCH_QUALIFICATION.md#inkling-aligned-prefill-checkpoint`.
+  Evidence: `workdir/diag/inkling_cache_speed_1/`.
+
 ## Historical machine-migration handoff (2026-09-13)
 
 The following migration record is retained as written. Its release, Git state,

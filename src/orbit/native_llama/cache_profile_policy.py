@@ -10,12 +10,13 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from .model_profiles import (
-    ORNITH15_PROFILE_ID, QWEN3_CODER_PROFILE_ID, QWEN38_FLASH_NEXT_PROFILE_ID,
+    ORNITH15_PROFILE_ID, QWEN3_CODER_PROFILE_ID, QWEN38_FLASH_NEXT_PROFILE_ID, INKLING2_PROFILE_ID,
 )
 
 
 @dataclass(frozen=True)
 class CacheProfilePolicy:
+    aligned_prompt_checkpoint: bool = False
     jinja_route_prefill: bool = False
     rolling_route: bool = False
     analysis_prefix: bool = False
@@ -37,6 +38,7 @@ class CacheProfilePolicy:
 
 _NONE = CacheProfilePolicy()
 _POLICIES = MappingProxyType({
+    INKLING2_PROFILE_ID: CacheProfilePolicy(aligned_prompt_checkpoint=True),
     QWEN3_CODER_PROFILE_ID: CacheProfilePolicy(
         jinja_route_prefill=True, preserve_fixed_on_mode_switch=True,
         preserve_fixed_on_session_reset=True,
