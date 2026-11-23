@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from typing import Any, Iterable
+from orbit.reasoning import parse_reasoning_effort
 
 
 DEFAULT_SESSION_ID = "default"
@@ -33,6 +34,7 @@ class ChatRequest:
     # decoded in route context ahead of the next route call.
     route_history_continuation: bool = False
     tool_choice: str = "auto"
+    reasoning_effort: str | None = None
 
 
 @dataclass(frozen=True)
@@ -50,7 +52,17 @@ def parse_chat_request(payload: dict[str, Any]) -> ChatRequest:
     if choice == "required" and (not _tools_from_payload(payload.get("tools"))
             or payload.get("artifact_content") or payload.get("thinking") or payload.get("stop")):
         raise ValueError("required tool decoding needs tools, thinking off, no artifact/stop override")
+    effort = parse_reasoning_effort(payload.get("reasoning_effort"))
+    kwargs = payload.get("chat_template_kwargs")
+    if isinstance(kwargs, dict) and "reasoning_effort" in kwargs:
+        nested = parse_reasoning_effort(kwargs["reasoning_effort"])
+        if effort is not None and nested is not None and effort != nested:
+            raise ValueError("conflicting reasoning_effort values")
+        effort = effort if effort is not None else nested
+    if choice == "required" and effort not in (None, "none"):
+        raise ValueError("required tool decoding only accepts reasoning_effort=none")
     return ChatRequest(
+        reasoning_effort=effort,
         messages=_messages_from_payload(payload),
         tool_choice=choice,
         max_tokens=_int_value(payload.get("max_tokens"), 256),
@@ -73,6 +85,8 @@ def parse_chat_request(payload: dict[str, Any]) -> ChatRequest:
 
 
 def parse_continue_request(payload: dict[str, Any]) -> ContinueRequest:
+    if payload.get("reasoning_effort") is not None:
+        raise ValueError("reasoning_effort cannot change during continuation; start a new chat request")
     return ContinueRequest(
         max_tokens=_int_value(payload.get("max_tokens"), 256),
         thinking=_thinking_mode(payload.get("thinking")),

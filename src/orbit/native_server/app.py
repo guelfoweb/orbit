@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from orbit.reasoning import reasoning_effort_scope
+
 import argparse
 import contextlib
 import json
@@ -280,8 +282,10 @@ class OrbitNativeServer:
             }
 
     def validate_request(self, request: ChatRequest) -> None:
+        if request.reasoning_effort is not None:
+            self.client.validate_reasoning_effort(request.reasoning_effort)
         thinking = self.client.config.thinking if request.thinking is None else request.thinking
-        if request.artifact_content and (request.tools or thinking or request.stop):
+        if request.artifact_content and (request.tools or thinking or request.stop or request.reasoning_effort is not None):
             raise ValueError(
                 "artifact content generation requires tools, thinking, and stop sequences to be disabled"
             )
@@ -295,7 +299,7 @@ class OrbitNativeServer:
             if on_token:
                 on_token(text)
 
-        with self._model_lock():
+        with self._model_lock(), reasoning_effort_scope(request.reasoning_effort):
             thinking = self.client.config.thinking if request.thinking is None else request.thinking
             final_prefix_experiment = request.final_prefix_experiment and _is_final_from_tool_prompt(request.messages)
             qwen_route_prefix_anchor = (
@@ -460,6 +464,7 @@ class OrbitNativeServer:
             "batch_size": self.client.config.batch_size,
             "ubatch_size": self.client.config.ubatch_size,
             "parallel_slots": 1,
+            "reasoning_effort_levels": list(self.client.supported_reasoning_effort_levels()) if isinstance(self.client, NativeLlamaClient) else [],
             "thinking_mode": "on" if self.client.config.thinking else "off",
         }
 
@@ -476,11 +481,14 @@ class OrbitNativeServer:
         tools: list[dict[str, Any]],
         thinking: bool,
         tool_choice: str = "auto",
+        reasoning_effort: str | None = None,
     ) -> dict[str, int | str]:
         # The Qwen bridge keeps the parser associated with its latest render.
         # Serialize inspection with completion so concurrent token accounting
         # cannot replace parser state while generated text is being decoded.
-        with self._model_lock():
+        if reasoning_effort is not None:
+            self.client.validate_reasoning_effort(reasoning_effort)
+        with self._model_lock(), reasoning_effort_scope(reasoning_effort):
             tokens, rendered_hash, token_hash = self.client.inspect_chat_tokens(
                 messages,
                 tools=tools,
@@ -492,6 +500,7 @@ class OrbitNativeServer:
             "context_tokens": self.client.config.context_tokens,
             "rendered_hash": rendered_hash,
             "token_hash": token_hash,
+            **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),
         }
 
     def count_artifact_content_tokens(self, messages: list[dict[str, Any]]) -> dict[str, int | str]:
@@ -638,6 +647,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                     "batch_size": runtime["batch_size"],
                     "ubatch_size": runtime["ubatch_size"],
                     "parallel_slots": runtime["parallel_slots"],
+                    "reasoning_effort_levels": runtime.get("reasoning_effort_levels", []),
                     "final_prefix_experiment_enabled": final_prefix["enabled"],
                     "final_prefix_experiment_initialized": final_prefix["initialized"],
                     "final_prefix_experiment_prefix_tokens": final_prefix["prefix_tokens"],
@@ -700,6 +710,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                             request.messages,
                             tools=request.tools,
                             thinking=bool(request.thinking),
+                            **({"reasoning_effort": request.reasoning_effort} if request.reasoning_effort is not None else {}),
                             **({"tool_choice": request.tool_choice} if request.tool_choice != "auto" else {}),
                         )
                     )

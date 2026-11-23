@@ -109,12 +109,22 @@ pinned to the Mainline_Support artifact, saved locally with a `.gguf` extension.
 The tested artifact is 16,610,544,608 bytes, SHA256
 `78fcedcf93c5d1bfe83e225513b71392bb52259be0eaa5f8899c856a2e5834ae`.
 
+Inkling accepts the named `reasoning_effort` values `none`, `minimal`, `low`,
+`medium`, `high`, `xhigh` and `max` in native CHAT requests. `max` and `xhigh`
+both map to 0.99 in this exact model's template. Explicit effort is passed to
+the native template, including exact token counting; it does not insert custom
+instructions into messages. The local GUI exposes all seven choices and starts
+at **None**. None requests minimum effort, not a complete reasoning shutdown.
+Higher effort does not guarantee more tokens or a slower response on every prompt.
+Rebuild the mainline-support backend after updating to obtain this capability.
+See [named effort controls](docs/MODEL_RESEARCH_QUALIFICATION.md#named-reasoning-effort).
+
 Post-tool finals reserve 1024 internal reasoning tokens alongside their existing
 bounded answer allowance. Native separated-reasoning CHAT uses incremental
 visible output when streaming is requested; answers requiring evidence/citation
 verification may still be delivered together after checking.
 
-With the exact CPU configuration above, thinking off and no MTP, Inkling can
+With the exact CPU configuration above, thinking off, None effort and no MTP, Inkling can
 reuse one in-memory checkpoint of the first 1024 prompt tokens. The first long
 request captures it; later requests must share those exact tokens and the same
 model, template, native build, context and session identity. Short requests do
