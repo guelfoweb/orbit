@@ -112,10 +112,21 @@ The tested artifact is 16,610,544,608 bytes, SHA256
 Post-tool finals reserve 1024 internal reasoning tokens alongside their existing
 bounded answer allowance. Native separated-reasoning CHAT uses incremental
 visible output when streaming is requested; answers requiring evidence/citation
-verification may still be delivered together after checking. The retained cache
-probe reused zero tokens on three identical inputs because the native memory
-refused partial removal; this integration does not claim cache acceleration.
-See [reasoning budgets and cache observations](docs/MODEL_RESEARCH_QUALIFICATION.md#post-tool-finals-with-required-reasoning).
+verification may still be delivered together after checking.
+
+With the exact CPU configuration above, thinking off and no MTP, Inkling can
+reuse one in-memory checkpoint of the first 1024 prompt tokens. The first long
+request captures it; later requests must share those exact tokens and the same
+model, template, native build, context and session identity. Short requests do
+not use it. Reset, cancellation, completion errors or an ineligible configuration discard
+it. Native calls carrying a tools payload are ineligible. A failed restore
+clears native memory and falls back to ordinary prefill.
+The observed checkpoint uses about 196 MiB plus a temporary copy; its hard limit
+is 256 MiB. Set `ORBIT_ALIGNED_PREFIX_REUSE=0` before starting the server to
+disable it. This reduces repeated prefill work; it does not accelerate token
+generation or eliminate the first request's cold cost.
+See [the checkpoint contract](docs/MODEL_RESEARCH_QUALIFICATION.md#inkling-aligned-prefill-checkpoint)
+and [reasoning budgets](docs/MODEL_RESEARCH_QUALIFICATION.md#post-tool-finals-with-required-reasoning).
 
 This profile does not use MTP, GPU offload or multimodal input. Its internal
 reasoning remains active even with `--think off`; Orbit separates that reasoning

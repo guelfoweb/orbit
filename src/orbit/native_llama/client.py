@@ -58,6 +58,7 @@ from .model_profiles import (
 from .gguf_split import split_sibling_names
 from .model_discovery import inspect_native_model_profile
 from .research_admission import ResearchAdmission
+from .aligned_prefix_cache import AlignedPrefixCache, PREFIX_TOKENS as ALIGNED_PREFIX_TOKENS, enabled as aligned_prefix_enabled, qualified_config as aligned_prefix_config
 from .cache_profile_policy import (
     ROLLING_ROUTE_PROFILE_IDS, POST_FINAL_ROUTE_SHADOW_PROFILE_IDS,
     cache_policy_for_profile,
@@ -526,6 +527,7 @@ class NativeLlamaClient:
         self.lib.lib.llama_log_set(cb, None)
 
     def close(self) -> None:
+        self._invalidate_aligned_prefix("client_closed")
         # Freeing the context destroys the KV the identity describes.
         self._invalidate_committed_sequence()
         lib = self.lib.lib
@@ -557,6 +559,7 @@ class NativeLlamaClient:
         # corrupt teardown after mixed target-only/MTP client lifetimes.
 
     def cancel(self) -> None:
+        self._invalidate_aligned_prefix("cancelled")
         self._invalidate_final_prefix("cancelled")
         self._invalidate_qwen_route_prefix("cancelled")
         self._invalidate_qwen36_shell_tool_prefix("cancelled")
@@ -974,6 +977,7 @@ class NativeLlamaClient:
         self._active_profile_render = None
         self._profile_last_raw_output = ""
         self._profile_last_parsed_content = ""
+        self._invalidate_aligned_prefix("session_reset")
         if not preserve_ornith_rolling_route_checkpoint:
             self._reset_generation += 1
             self._invalidate_rolling_route_anchor("session_reset")
@@ -2419,6 +2423,9 @@ class NativeLlamaClient:
                         return mtp_result
             self._last_completion_used_mtp = False
             self._last_completion_generation_cap = max_tokens
+            aligned_reuse = self._aligned_prefix_eligible(thinking=thinking)
+            if not aligned_reuse:
+                self._invalidate_aligned_prefix("ineligible")
             timings = self._complete_prompt_standard(
                 prompt,
                 max_tokens=max_tokens,
@@ -2439,7 +2446,10 @@ class NativeLlamaClient:
                 sampler_override=sampler_override,
                 utf8_errors=utf8_errors,
                 request_timing=request_timing,
+                **({"aligned_prefix_reuse": True} if aligned_reuse else {}),
             )
+            if timings.cancelled:
+                self._invalidate_aligned_prefix("cancelled")
             self._session.last_metrics = timings
             self._session.continuation_ready = _can_continue_from_timings(timings)
             if final_prefix_segments is not None and timings.cancelled:
@@ -2450,6 +2460,7 @@ class NativeLlamaClient:
                 self._invalidate_coder_route_prefix_after_failed_completion("cancelled")
             return timings
         except Exception:
+            self._invalidate_aligned_prefix("completion_error")
             # KV may hold a partially decoded prompt matching neither the
             # previous nor the new sequence: identity is no longer provable.
             self._invalidate_committed_sequence()
@@ -2683,6 +2694,7 @@ class NativeLlamaClient:
         prompt: str,
         *,
         max_tokens: int = 16,
+        aligned_prefix_reuse: bool = False,
         route_anchor_segments: RoutePromptSegments | None = None,
         qwen_route_anchor_plan: _QwenRouteAnchorRuntimePlan | None = None,
         qwen36_shell_tool_anchor_plan: _Qwen36ShellToolAnchorRuntimePlan | None = None,
@@ -2730,6 +2742,15 @@ class NativeLlamaClient:
             self._record_qwen36_shell_tool_prefix_fallback("production_prefix_changed")
             qwen36_shell_tool_anchor_plan = None
         final_plan = self._final_prefix_plan(prompt, prompt_tokens, final_prefix_segments)
+        aligned_identity = None
+        if aligned_prefix_reuse and all(plan is None for plan in (
+            final_plan, qwen_route_anchor_plan, qwen36_shell_tool_anchor_plan, anchor_plan,
+        )) and not rolling_route_eligible:
+            try:
+                aligned_identity = self._aligned_prefix_identity()
+            except Exception:
+                self._invalidate_aligned_prefix("identity_unavailable")
+        aligned_prefix_reuse = aligned_identity is not None
         anchor_metadata: dict[str, object] | None = None
         processed_start = 0
         if qwen_route_anchor_plan is not None and self._rolling_outranks_route_prefix(
@@ -2759,6 +2780,8 @@ class NativeLlamaClient:
         elif rolling_route_eligible and rolling_route_identity is not None:
             self._rolling_route_identity_cache = rolling_route_identity
             reused = self._prepare_memory_with_ornith_rolling_route_anchor(prompt_tokens)
+        elif aligned_prefix_reuse:
+            reused = self._prepare_memory_with_aligned_prefix(prompt_tokens, aligned_identity)
         elif anchor_plan is None:
             reused = self._prepare_memory_for_prompt(prompt_tokens)
         else:
@@ -2790,6 +2813,18 @@ class NativeLlamaClient:
                 )
             )
         token_array = (llama_token * n_prompt)(*prompt_tokens)
+        if (aligned_prefix_reuse and processed == 0 and ALIGNED_PREFIX_TOKENS < n_prompt
+                and not self.cancel_event.is_set()):
+            processed = self._decode_prompt_range(
+                token_array, processed=processed, end=ALIGNED_PREFIX_TOKENS,
+                step=step, total=n_prompt, on_progress=on_progress,
+                should_cancel=should_cancel, reused=reused, started_us=pf_start,
+            )
+            if processed == ALIGNED_PREFIX_TOKENS and not self.cancel_event.is_set():
+                self._aligned_prefix_store().capture(
+                    lib, self._session.ctx_tgt, prompt_tokens[:ALIGNED_PREFIX_TOKENS],
+                    aligned_identity,
+                )
         # Where the ANALYSIS lineage checkpoints: at the turn boundary, before
         # the generation prompt. A checkpoint taken at the end of the prompt
         # carries the assistant-turn opener, and no same-phase successor ever
@@ -5067,6 +5102,54 @@ class NativeLlamaClient:
         if rc < 0:
             raise RuntimeError("failed to tokenize prompt")
         return [int(token_array[i]) for i in range(n_prompt)]
+
+    def _aligned_prefix_store(self) -> AlignedPrefixCache:
+        cache = getattr(self, "_aligned_prefix_cache", None)
+        if cache is None:
+            cache = AlignedPrefixCache()
+            self._aligned_prefix_cache = cache
+        return cache
+
+    def _invalidate_aligned_prefix(self, reason: str) -> None:
+        cache = getattr(self, "_aligned_prefix_cache", None)
+        if cache is not None:
+            cache.clear(reason)
+
+    def _aligned_prefix_eligible(self, *, thinking: bool) -> bool:
+        profile = getattr(self, "model_profile", None)
+        if not getattr(profile, "verified", False):
+            return False
+        if not cache_policy_for_profile(getattr(profile, "profile_id", None)).aligned_prompt_checkpoint:
+            return False
+        return (aligned_prefix_enabled() and not thinking and aligned_prefix_config(self.config)
+                and not self._session.mtp_enabled
+                and getattr(self, "_persistent_mtp_runtime", None) is None
+                and self._session.prompt_cache_mode == "chat:thinking=off")
+
+    def _aligned_prefix_identity(self) -> str:
+        return hash_text(json.dumps({
+            "strategy": "aligned-prefill-1024-v1",
+            "context": str(self._session.ctx_tgt),
+            "model": str(self.paths.model),
+            "profile": self.model_profile.profile_id,
+            "template": self.model_profile.template_sha256,
+            "metadata": sorted(self._model_metadata_identity.items()),
+            "native": self._qwen_backend_build_identity(),
+            "config": repr(self.config),
+            "session": self._session.session_id,
+            "reset": self._reset_generation,
+        }, sort_keys=True))
+
+    def _prepare_memory_with_aligned_prefix(self, prompt_tokens: list[int], identity: str) -> int:
+        cache = self._aligned_prefix_store()
+        if cache.matches(prompt_tokens, identity):
+            self._clear_target_memory()
+            if cache.restore(self.lib.lib, self._session.ctx_tgt, prompt_tokens, identity):
+                self._session.committed_sequence_tokens = list(prompt_tokens[:ALIGNED_PREFIX_TOKENS])
+                self._session.cached_prompt_tokens = list(prompt_tokens[:ALIGNED_PREFIX_TOKENS])
+                return self._prepare_memory_for_prompt(prompt_tokens)
+            self._clear_target_memory()
+        return self._prepare_memory_for_prompt(prompt_tokens)
 
     def _prepare_memory_for_prompt(self, prompt_tokens: list[int]) -> int:
         if not self._session.ctx_tgt:
