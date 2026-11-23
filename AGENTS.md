@@ -172,6 +172,45 @@ These dispositions carry forward ORBIT-TODO-PRIORITY-AUDIT-1 and the subsequent
   Qualification command: ctx8192, threads6, threads-batch6, batch256, ubatch128,
   think off, repack off. Performance is host/run-specific.
 
+### Required-reasoning finals and local GUI follow-up (2026-11-23)
+
+- Post-tool CHAT finals now add the existing fixed 1024-token internal reserve
+  for an explicit native `always` + separated-reasoning declaration. Each
+  ordinary final, existing length retry, completion repair and compact repair
+  computes its own base and adds the reserve once before exact admission.
+  A listing final is 96 + 1024; system_info is 160 + 1024. This is a combined
+  generation ceiling, not separately enforced visible/reasoning quotas.
+  Optional/unknown profiles, retry counts, prompts, parsers, full-document and
+  ANALYSIS finalization budgets are unchanged; arbitrary truncation is not
+  universally ruled out. Contract: `docs/MODEL_RESEARCH_QUALIFICATION.md`.
+- Native separated-reasoning pure CHAT uses the streaming transport when a
+  callback is supplied, without duplicating its answer or storing reasoning as
+  visible assistant content. Existing citation/evidence withholding still
+  applies; do not claim universal token streaming after every tool.
+- An optional keyword-only `ChatRuntime.user_turn_namespace` lets consumers
+  avoid citation ownership collisions when resetting a counter over a shared
+  retained evidence store. Default legacy IDs remain unchanged. The local,
+  unpublished `gui/` app opts into a fresh UUID namespace per new/reconnected
+  runtime. This prevents old records becoming current-turn citations; retained
+  store/card scope, durable records and re-attestation are unchanged. The prior
+  GUI system_info attribution error is retained, not reclassified as a pass.
+- Final source qualification: **6629 tests / 47 skips / RC=0**, **391 core tests
+  / zero skips**, **306 focused tests**, **22 local GUI tests**, eight applied
+  mutants caught and independent review BLOCKER 0 / MAJOR 0 / MINOR 0.
+  These are run-scoped source counts, not new ANALYSIS semantic qualification.
+- Exact Q4_K_M artifact/backend unchanged. Final local GUI probes completed
+  directory listing and system_info with `stop`, no length retries/repairs, and
+  correctly owned current tool references; native-reasoning CHAT delivered 78
+  visible delta events over approximately 14 seconds. This is a bounded
+  completion/streaming observation, not a general semantic or speed claim.
+- **Cache observation, no optimization enabled:** three identical 507-token
+  requests in the same session reused zero tokens; the resident completed
+  sequence was 538 tokens and native partial removal returned false. The tested
+  523-token continuation also missed strict append. Safe cold prefill remains
+  necessary for those inputs. No foreign model cache policy, native changes,
+  MTP, prompt tuning or fabricated reuse was introduced. Evidence and scope:
+  `workdir/diag/inkling_final_budget_cache_1/`.
+
 ## Historical machine-migration handoff (2026-09-13)
 
 The following migration record is retained as written. Its release, Git state,

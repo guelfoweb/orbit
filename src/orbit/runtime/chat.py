@@ -167,6 +167,7 @@ class ChatRuntime:
     local_capabilities: LocalCapabilities = field(default_factory=discover_local_capabilities)
     diagnostic_session_id: str = "default"
     evidence_store: EvidenceStore | None = None
+    user_turn_namespace: str | None = field(default=None, kw_only=True)
     user_turn_counter: int = 0
     current_user_turn_id: str | None = None
     current_turn_evidence_sequence_start: int = 0
@@ -190,6 +191,11 @@ class ChatRuntime:
     context_tokens_saved: int = 0
 
     def __post_init__(self) -> None:
+        if self.user_turn_namespace is not None and (
+            not isinstance(self.user_turn_namespace, str)
+            or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", self.user_turn_namespace) is None
+        ):
+            raise ValueError("user_turn_namespace must contain 1-64 letters, digits, underscores or hyphens")
         self.backend = ContextManagedBackend(instrument_backend(self.backend), self._prepare_model_context)
         if hasattr(self.backend, "thinking"):
             self.thinking_mode = bool(getattr(self.backend, "thinking"))
@@ -203,7 +209,10 @@ class ChatRuntime:
     def _begin_user_turn(self) -> str:
         self.last_analysis_request = None
         self.user_turn_counter += 1
-        self.current_user_turn_id = f"turn_{self.user_turn_counter}"
+        self.current_user_turn_id = (
+            f"turn_{self.user_turn_namespace}_{self.user_turn_counter}"
+            if self.user_turn_namespace is not None else f"turn_{self.user_turn_counter}"
+        )
         sequences = (
             [record.evidence_sequence for record in self.evidence_store.records.values()]
             if self.evidence_store is not None

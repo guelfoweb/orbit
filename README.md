@@ -109,6 +109,14 @@ pinned to the Mainline_Support artifact, saved locally with a `.gguf` extension.
 The tested artifact is 16,610,544,608 bytes, SHA256
 `78fcedcf93c5d1bfe83e225513b71392bb52259be0eaa5f8899c856a2e5834ae`.
 
+Post-tool finals reserve 1024 internal reasoning tokens alongside their existing
+bounded answer allowance. Native separated-reasoning CHAT uses incremental
+visible output when streaming is requested; answers requiring evidence/citation
+verification may still be delivered together after checking. The retained cache
+probe reused zero tokens on three identical inputs because the native memory
+refused partial removal; this integration does not claim cache acceleration.
+See [reasoning budgets and cache observations](docs/MODEL_RESEARCH_QUALIFICATION.md#post-tool-finals-with-required-reasoning).
+
 This profile does not use MTP, GPU offload or multimodal input. Its internal
 reasoning remains active even with `--think off`; Orbit separates that reasoning
 from visible answers and reserves the declared decision budget. The tested

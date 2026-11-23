@@ -24,6 +24,7 @@ MODULES = (
     "tests.test_cache_profile_policy",
     "tests.test_core_checks",
     "tests.test_reasoning_decision_budget",
+    "tests.test_reasoning_final_budget",
     "tests.test_native_family_isolation",
 )
 

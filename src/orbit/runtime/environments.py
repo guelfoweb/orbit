@@ -9,7 +9,7 @@ import time
 
 from orbit.backend import ChatResult
 from orbit.backend.base import Message, RecoverableBackendError, StreamProgress
-from orbit.runtime.completion_budget import CompletionBudget, resolve_max_tokens
+from orbit.runtime.completion_budget import CompletionBudget, resolve_max_tokens, reasoning_final_budget
 from orbit.runtime.continue_controller import ContinueController
 from orbit.runtime.document_search import (
     DOCUMENT_SEARCH_PLAN_MAX_TOKENS,
@@ -338,23 +338,23 @@ class PureChatEnvironment:
         self.runtime.messages.append({"role": "user", "content": user_content})
         if self.runtime.thinking_mode and _uses_native_separated_reasoning(self.runtime.backend):
             if on_phase_start:
-                on_phase_start(ModelPhaseStart("chat_final", streamed=False, attempt=1, reason="native_separated_reasoning"))
+                on_phase_start(ModelPhaseStart("chat_final", streamed=on_final_delta is not None, attempt=1, reason="native_separated_reasoning"))
             with self.transport.backend_thinking(True):
                 with model_call_context(phase="chat_final", tools_mode="off"):
                     result = self.transport.chat_once(
                         call_messages,
                         temperature=temperature,
                         max_tokens=resolve_max_tokens("chat", max_tokens),
-                        on_final_delta=None,
+                        on_final_delta=on_final_delta,
                         on_progress=on_progress,
                     )
             if on_model_step:
                 on_model_step(ModelStepMetrics.from_result(loop=loop, result=result, phase="chat_final"))
             if on_final_delta:
                 if result.reasoning_content:
+                    if result.content:
+                        on_final_delta("\n")
                     on_final_delta(f"<|channel>thought\n{result.reasoning_content}<channel|>")
-                if result.content:
-                    on_final_delta(result.content)
             self.runtime.messages.append({"role": "assistant", "content": result.content})
             return result
         if self.runtime.thinking_mode:
@@ -1255,6 +1255,7 @@ class FinalFromToolEnvironment:
             evidence_kind=evidence_kind,
             evidence_chars=evidence_chars,
         )
+        policy = replace(policy, max_tokens=reasoning_final_budget(policy.max_tokens, self.runtime.backend))
         stream_buffer = _BufferedDeltaSink() if on_final_delta is not None and policy.incomplete_retry_allowed else None
         direct_delta = _ForwardingDeltaSink(on_final_delta) if on_final_delta is not None and stream_buffer is None else None
         final_delta = stream_buffer.write if stream_buffer is not None else (direct_delta.write if direct_delta is not None else on_final_delta)
@@ -1322,6 +1323,7 @@ class FinalFromToolEnvironment:
                 web_search_result=policy.web_search_result,
                 previous_finish_reason=result.finish_reason,
             )
+            retry_max_tokens = reasoning_final_budget(retry_max_tokens, self.runtime.backend)
             if on_phase_start:
                 on_phase_start(
                     ModelPhaseStart(
@@ -1388,6 +1390,7 @@ class FinalFromToolEnvironment:
                 evidence_chars=evidence_chars,
                 previous_finish_reason=result.finish_reason,
             )
+            repair_max_tokens = reasoning_final_budget(repair_max_tokens, self.runtime.backend)
             if on_phase_start:
                 on_phase_start(
                     ModelPhaseStart(
@@ -1436,6 +1439,7 @@ class FinalFromToolEnvironment:
             original_result = best_non_empty_result or result
             compact_messages = [*policy.messages, final_tool_compact_retry_instruction()]
             compact_max_tokens = final_tool_compact_retry_max_tokens(max_tokens, messages=policy.messages)
+            compact_max_tokens = reasoning_final_budget(compact_max_tokens, self.runtime.backend)
             if on_phase_start:
                 on_phase_start(
                     ModelPhaseStart(

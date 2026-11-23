@@ -158,6 +158,54 @@ finished but manual CHAT review remains. This command never exits 0 to imply
 general qualification. An explicitly reviewed production profile, normal
 integration tests and any applicable semantic baseline remain separate work.
 
+## Post-tool finals with required reasoning
+
+The same strict native `always` + separated-reasoning declaration now reserves
+1024 internal tokens alongside each existing CHAT post-tool final allowance.
+The small visible-answer policies remain 96/160/192/256 tokens as applicable;
+for example a directory-listing final receives a total ceiling of 1120 instead
+of 96. Each existing length retry, completion repair and compact repair computes
+its own ordinary base and adds the reserve once. There are no new attempts.
+The total is a combined generation ceiling, not separately enforced reasoning
+and visible-text quotas; either can consume it. Exact context admission receives the entire ceiling before inference and
+refuses a request that cannot fit. Optional/unknown declarations retain their
+previous limits. Pure CHAT, full-document and ANALYSIS finalization budgets are
+unchanged. A bounded reserve is not a guarantee against every possible length
+failure and does not certify the answer's semantics.
+
+Native separated-reasoning pure CHAT now uses the streaming transport when a
+visible callback is provided; it no longer forces a non-stream request just
+because thinking is enabled. Separated reasoning is not stored as visible
+assistant content. Existing evidence/citation withholding remains authoritative:
+a session with an evidence store can still deliver the checked final in one
+block. This change does not remove that guard or promise universal streaming.
+
+Cache eligibility is independent of these budgets. In retained Dell observations
+for Inkling, three identical 507-token inputs reused zero tokens: the native
+memory refused partial sequence removal and Orbit cleared it for a safe cold
+prefill. A tested 523-token continuation also reused zero. This is measured
+behavior of those sequences, not proof that every possible continuation misses.
+No cache profile, snapshot policy, prompt identity, native library or MTP setting
+is changed by this budget fix. Diagnostic evidence is retained under
+`workdir/diag/inkling_final_budget_cache_1/`.
+
+## GUI conversation turn ownership
+
+`ChatRuntime` accepts an optional keyword-only `user_turn_namespace` containing
+1–64 ASCII letters, digits, underscores or hyphens. The default remains `None`
+and preserves existing `turn_1`, `turn_2`, ... IDs. An opting-in consumer gets
+`turn_<namespace>_<counter>` IDs. The local GUI creates a fresh UUID namespace
+for each new/reconnected runtime, including a newly opened or resumed session.
+This prevents its restarted turn counter from making a previous conversation's
+records eligible for current-turn citation.
+
+The evidence store and retained records remain scoped as before. This is turn
+ownership protection, not deletion of prior evidence, a general evidence-store
+isolation boundary, a semantic classifier or a relaxation of re-attestation.
+The observed pre-fix GUI `system_info` completion with a previous directory
+citation is retained as a rejected attribution observation in the diagnostics.
+It is not a semantic qualification for the model.
+
 ## Deterministic checks
 
 ```bash
