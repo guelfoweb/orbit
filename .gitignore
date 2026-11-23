@@ -42,3 +42,7 @@ src/orbit/native_llama/vendor/shim/orbit-mtp-completion
 !/workdir/samples/vulnerable_service.py
 /workdir/diag/
 /workdir/campaign/
+
+# Each native family owns its generated artifacts.
+/src/orbit/native_llama/vendor/families/*/build/
+/src/orbit/native_llama/vendor/families/*/lib/

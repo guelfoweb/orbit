@@ -135,6 +135,43 @@ These dispositions carry forward ORBIT-TODO-PRIORITY-AUDIT-1 and the subsequent
   run failed and was not accepted or waived. These source checks do not turn
   Liquid's 5/24 tool-intent FAIL into a capability qualification.
 
+### Inkling integration qualification (2026-11-23)
+
+- Inkling 2 Mini Mainline_Support UD-Q4_K_M is admitted as the exact registered
+  profile `inkling2-mini-ud-q4-k-m`, CPU/text only, without MTP. Its separate
+  `mainline-support` family uses upstream b12611 / `690b87d88151dbd775bb6eff5581663688785928`
+  and its compiled 176-byte context ABI. Legacy vendor source/shims and backend
+  selection remain unchanged; never load both ABI families in one process.
+  Build the new family with `python3 scripts/build_native.py --family mainline-support`.
+- Exact artifact: `/srv/orbit-models/unsloth--Inkling-2-Mini-GGUF/Inkling-2-Mini-UD-Q4_K_M.gguf`,
+  16,610,544,608 bytes, SHA256
+  `78fcedcf93c5d1bfe83e225513b71392bb52259be0eaa5f8899c856a2e5834ae`.
+  Remote revision `800c946d7b9c830c86290df49afbbe91db8455f5`, file
+  `Mainline_Support/Inkling-2-Mini-UD-Q4_K_M.gguf_file`. Full hash, exact metadata,
+  template, identity and load passed; five tools-off CHAT observations were
+  manually reviewed PASS. Internal reasoning is required/separated, including
+  with think off; the existing 1024-token reserve applies. No MTP support is claimed.
+- The final normal registered-profile gate passed **24/24**, with zero missed,
+  wrong or unwanted handoffs, zero invalid route/protocol outcomes and no retry.
+  The executor was intercepted: zero model-selected operations actually ran.
+  Source and native identities were unchanged across the complete run. This does
+  not qualify code correctness, unrestricted tools or ANALYSIS semantics (NOT_RUN).
+  The prior research 21/24 failure remains historical evidence, not a passing run.
+- Shared ROUTE consumption now retains bounded direct prose through terminal
+  completion; strict complete-envelope admission carries decoded tool ownership
+  without rescanning argument strings. No intent classifier, prompt/oracle change
+  or extra retry masks model choices. MiMo and Liquid remain disabled and not
+  qualified; their retained stops are unchanged.
+- Source qualification: **6619 tests / 47 skips / RC=0**, with **381 core tests /
+  zero skips / RC=0**. Fourteen applied family mutations and eight shared ROUTE
+  mutations were caught; independent scope reviews closed at BLOCKER 0 / MAJOR 0.
+  Counts describe these runs; skips remain host-dependent.
+- Evidence: `workdir/diag/inkling_isolated_integration_1/` (normal-profile
+  `registered-qualification-1/`, source/native gates and mutation results),
+  `workdir/diag/route_completion_parity_1/` (shared ROUTE evidence).
+  Qualification command: ctx8192, threads6, threads-batch6, batch256, ubatch128,
+  think off, repack off. Performance is host/run-specific.
+
 ## Historical machine-migration handoff (2026-09-13)
 
 The following migration record is retained as written. Its release, Git state,

@@ -67,11 +67,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Reduce output to errors and final success summary.",
     )
+    parser.add_argument("--family", choices=("legacy", "mainline-support"), default="legacy",
+                        help="Select the isolated native family to build.")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.family != "legacy":
+        from .family_build import build_family
+        return build_family(args)
     if args.verbose and args.quiet:
         print("error: --verbose and --quiet cannot be used together", file=sys.stderr)
         return 1

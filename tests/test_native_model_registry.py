@@ -64,6 +64,7 @@ class NativeModelRegistryTests(unittest.TestCase):
                 ("Ornith 1.5 35B-A3B", "orbit-ornith15-native-v1"),
                 ("Qwen3-Coder 30B-A3B", "orbit-qwen3-coder-native-v1"),
                 ("Qwen 3.8 Flash Next", "orbit-qwen38-flash-next-native-v1"),
+                ("Inkling 2 Mini UD-Q4_K_M", "orbit-inkling2-mini-native-v1"),
             ],
         )
         self.assertEqual(
@@ -99,6 +100,8 @@ class NativeModelRegistryTests(unittest.TestCase):
                     "unsloth/Qwen3.8-Flash-Next-GGUF",
                     "Qwen3.8-Flash-Next-UD-IQ1_M-00001-of-00003.gguf",
                 ),
+                ("orbit-inkling2-mini-native-v1", "unsloth/Inkling-2-Mini-GGUF",
+                 "Inkling-2-Mini-UD-Q4_K_M.gguf"),
             ],
         )
 

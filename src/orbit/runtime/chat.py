@@ -81,9 +81,8 @@ from orbit.runtime.command_request import (
     command_stream_state,
     classify_route_output,
     decision_tool_names,
-    parse_command_decision,
+    admit_route_content,
     parse_command_decision_from_tool_calls,
-    command_tool_call_from_content,
     command_tool_call_from_tool_calls,
 )
 from orbit.runtime.results import error_result
@@ -605,8 +604,9 @@ class ChatRuntime:
                         )
         if on_model_step:
             on_model_step(ModelStepMetrics.from_result(loop=1, result=first, phase="route"))
-        command_content = first.content
-        decision = parse_command_decision_from_tool_calls(first.tool_calls) or parse_command_decision(command_content)
+        content_admission = admit_route_content(first.content)
+        decision = (parse_command_decision_from_tool_calls(first.tool_calls)
+                    or (content_admission.decision if content_admission is not None else None))
         route_outcome_emitted = False
         if decision is not None:
             _emit_route_outcome_for_result(first, decision=decision, outcome=_route_parsed_outcome(decision))
@@ -667,7 +667,9 @@ class ChatRuntime:
                             )
                 if on_model_step:
                     on_model_step(ModelStepMetrics.from_result(loop=2, result=route_retry, phase="route_retry"))
-                retry_decision = parse_command_decision_from_tool_calls(route_retry.tool_calls) or parse_command_decision(route_retry.content)
+                retry_admission = admit_route_content(route_retry.content)
+                retry_decision = (parse_command_decision_from_tool_calls(route_retry.tool_calls)
+                                  or (retry_admission.decision if retry_admission is not None else None))
                 if retry_decision is not None:
                     _emit_route_outcome_for_result(route_retry, decision=retry_decision, outcome=_route_parsed_outcome(retry_decision))
                     route_outcome_emitted = True
@@ -680,8 +682,8 @@ class ChatRuntime:
                     )
                 if retry_decision is not None:
                     first = route_retry
-                    command_content = route_retry.content
                     decision = retry_decision
+                    content_admission = retry_admission
             if decision is None:
                 if explicit_web_search or file_content_evidence:
                     bundle = self._run_tool_loop_for_request(
@@ -698,7 +700,6 @@ class ChatRuntime:
                         tool_names=("exec_shell_full_command",),
                     )
                     return self._remember_visible_result_streamed(_visible_delta, _delta_sink, _tool_loop_result_value(bundle))
-                initial_shell_tool_call = command_tool_call_from_tool_calls(first.tool_calls, ("exec_shell_full_command",)) or command_tool_call_from_content(command_content, ("exec_shell_full_command",))
                 route_requires_chat_final = contains_control_channel_markup(first.content)
                 if route_requires_chat_final and first.finish_reason != "length":
                     if not route_outcome_emitted:
@@ -838,7 +839,9 @@ class ChatRuntime:
         if decision.route == ToolRoute.FILESYSTEM:
             preflight = self._full_document_preflight_environment().answer_if_eligible(
                 prompt,
-                route_result=first,
+                route_result=(replace(first, tool_calls=[content_admission.tool_call])
+                              if not first.tool_calls and content_admission is not None
+                              and content_admission.tool_call is not None else first),
                 temperature=temperature,
                 max_tokens=max_tokens,
                 workdir=workdir,
@@ -887,7 +890,7 @@ class ChatRuntime:
             tool_names=tools,
             initial_tool_calls=(
                 command_tool_call_from_tool_calls(first.tool_calls, tools)
-                or command_tool_call_from_content(command_content, tools)
+                or (content_admission.tool_call if content_admission is not None else None)
             ),
             initial_finish_reason=first.finish_reason,
         )
@@ -1762,7 +1765,13 @@ class _RouteNotCommandAbort(StreamConsumerAbort):
 
 
 class _RouteDecisionStreamAbort:
-    """Stop an internal route stream once it cannot still become a route decision."""
+    """Buffer bounded route output; abort only empty/control-channel streams.
+
+    A non-JSON prefix can still become a complete direct answer, which the
+    non-streaming route path already accepts. Keep it private until the backend
+    returns its terminal result. Its existing generation/context budget still
+    bounds the call; an early prefix is never a completed CHAT decision.
+    """
 
     _MAX_PENDING_WHITESPACE_CHUNKS = 8
 
@@ -1777,7 +1786,8 @@ class _RouteDecisionStreamAbort:
         self._buffer += text
         if not self._buffer.strip() and self._chunks >= self._MAX_PENDING_WHITESPACE_CHUNKS:
             raise _RouteNotCommandAbort(self._buffer, chunks=self._chunks)
-        if command_stream_state(self._buffer) == "not_command":
+        if (command_stream_state(self._buffer) == "not_command"
+                and contains_control_channel_markup(self._buffer)):
             raise _RouteNotCommandAbort(self._buffer, chunks=self._chunks)
 
 

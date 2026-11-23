@@ -12,6 +12,7 @@ from .bindings import load_native_cdll, native_cdll_flags
 from .chat_template import render_gemma4_chat, render_gemma4_route_prompt_segments
 from .model_profiles import (
     GEMMA4_PROFILE_ID,
+    INKLING2_PROFILE_ID,
     QWEN36_PROFILE_ID,
     QWEN38_FLASH_NEXT_PROFILE_ID,
     QWEN38_PROFILE_ID,
@@ -53,6 +54,7 @@ def safe_native_capability_manifest(client: _TokenizingClient, *, final_system_p
         QWEN38_PROFILE_ID,
         QWEN38_FLASH_NEXT_PROFILE_ID,
         QWEN3_CODER_PROFILE_ID,
+        INKLING2_PROFILE_ID,
     }:
         build_bin = _client_build_bin(client)
         build = read_llama_cpp_build_info(build_bin) if build_bin is not None else _unavailable_build("build_bin_unavailable")

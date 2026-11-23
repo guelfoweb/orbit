@@ -29,7 +29,7 @@ from .bindings import (
     LLAMA_LAZY_MODE_ON,
     LLAMA_LOAD_MODE_MMAP,
 )
-from .chat_bridge import chat_bridge_filename
+from .chat_bridge import chat_bridge_filename, validate_chat_bridge_artifact
 from .finish_parameter_order import reorder_finish_parameters, exact_finish_arguments
 from .committed_identity import CommittedIdentity, AttributeBackedIdentity
 from .mtp_session_lifecycle import MtpSessionLifecycle
@@ -42,6 +42,7 @@ from . import client_status
 from .kv_diag import build_prompt_component_tokens, emit_decode_kv_state, emit_prompt_cache_event, emit_route_prefix_anchor_event, emit_route_shadow_event, emit_strict_append_miss, enabled as kv_diag_enabled
 from .multimodal import flatten_message_content, prepare_multimodal_messages
 from .artifact_capabilities import verified_artifact_supports
+from .rendered_prompt import RenderedChatPrompt, prompt_from_render
 from .model_profiles import (
     ORNITH15_PROFILE_ID,
     PROFILE_METADATA_KEYS,
@@ -339,10 +340,22 @@ class NativeLlamaClient:
             or self.config.mtp_accept_probe_enabled or self.config.mtp_decode_probe_enabled
         ):
             raise ValueError("research admission supports CPU-only, MTP-off qualification")
-        self.lib = LlamaLibrary(paths.build_bin)
+        if getattr(paths, "abi_profile", "legacy") != "legacy":
+            if (self.config.gpu_layers or self.config.low_memory or self.config.use_mtp_experimental
+                    or self.config.mtp_probe_enabled or self.config.mtp_dry_run_enabled
+                    or self.config.mtp_accept_probe_enabled or self.config.mtp_decode_probe_enabled
+                    or paths.mmproj_model is not None or paths.draft_mtp_model is not None):
+                raise ValueError("isolated mainline family supports CPU/text and MTP-off only")
+            if _resolve_mtmd_bridge_path(paths) is None or _resolve_chat_bridge_path(paths) is None:
+                raise RuntimeError("isolated mainline family requires both identity-verified native bridges")
+            # Verify both compiled bridge identities before any model/context setup.
+            validate_chat_bridge_artifact(paths.build_bin, _resolve_chat_bridge_path(paths))
+        abi_options = ({"abi_profile": paths.abi_profile}
+                       if getattr(paths, "abi_profile", "legacy") != "legacy" else {})
+        self.lib = LlamaLibrary(paths.build_bin, **abi_options)
         mtmd_bridge = _resolve_mtmd_bridge_path(paths)
         self.mtmd = (
-            MtmdLibrary(paths.build_bin, mtmd_bridge)
+            MtmdLibrary(paths.build_bin, mtmd_bridge, **abi_options)
             if mtmd_bridge is not None
             else None
         )
@@ -3195,7 +3208,7 @@ class NativeLlamaClient:
                     thinking=False,
                     **({"tool_choice": tool_choice} if tool_choice != "auto" else {}),
                 )
-                value = rendered.get("prompt")
+                value = prompt_from_render(rendered)
                 if not isinstance(value, str) or not value:
                     raise RuntimeError("empty Qwen route reference prompt")
                 return value
@@ -3224,7 +3237,7 @@ class NativeLlamaClient:
                     thinking=False,
                     **({"tool_choice": tool_choice} if tool_choice != "auto" else {}),
                 )
-                restored_prompt = restored.get("prompt")
+                restored_prompt = prompt_from_render(restored)
                 if restored_prompt != prompt:
                     spec = None
                     reason = "production_render_not_repeatable"
@@ -3315,7 +3328,7 @@ class NativeLlamaClient:
                     thinking=False,
                     **({"tool_choice": tool_choice} if tool_choice != "auto" else {}),
                 )
-                value = rendered.get("prompt")
+                value = prompt_from_render(rendered)
                 if not isinstance(value, str) or not value:
                     raise RuntimeError("empty Qwen3.6 shell reference prompt")
                 return value
@@ -3340,7 +3353,7 @@ class NativeLlamaClient:
                     thinking=False,
                     **({"tool_choice": tool_choice} if tool_choice != "auto" else {}),
                 )
-                restored_prompt = restored.get("prompt")
+                restored_prompt = prompt_from_render(restored)
                 if restored_prompt != prompt:
                     spec = None
                     reason = "production_render_not_repeatable"
@@ -4964,6 +4977,14 @@ class NativeLlamaClient:
     def tokenize(self, prompt: str) -> list[int]:
         if not self._vocab:
             raise RuntimeError("native client not loaded")
+        if isinstance(prompt, RenderedChatPrompt):
+            result = []
+            for index, (text, is_input) in enumerate(prompt.parts):
+                result.extend(self._tokenize_text(
+                    text, add_special=index == 0 and not prompt.startswith("<bos>"),
+                    parse_special=not is_input,
+                ))
+            return result
         return self._tokenize_text(prompt, add_special=not prompt.startswith("<bos>"))
 
     def count_text_tokens(self, text: str) -> int:
@@ -5035,14 +5056,14 @@ class NativeLlamaClient:
             return 0
         return len(self._tokenize_text(text, add_special=False))
 
-    def _tokenize_text(self, text: str, *, add_special: bool) -> list[int]:
+    def _tokenize_text(self, text: str, *, add_special: bool, parse_special: bool = True) -> list[int]:
         lib = self.lib.lib
         prompt_bytes = text.encode()
-        n_prompt = -lib.llama_tokenize(self._vocab, prompt_bytes, len(prompt_bytes), None, 0, add_special, True)
+        n_prompt = -lib.llama_tokenize(self._vocab, prompt_bytes, len(prompt_bytes), None, 0, add_special, parse_special)
         if n_prompt <= 0:
             return []
         token_array = (llama_token * n_prompt)()
-        rc = lib.llama_tokenize(self._vocab, prompt_bytes, len(prompt_bytes), token_array, n_prompt, add_special, True)
+        rc = lib.llama_tokenize(self._vocab, prompt_bytes, len(prompt_bytes), token_array, n_prompt, add_special, parse_special)
         if rc < 0:
             raise RuntimeError("failed to tokenize prompt")
         return [int(token_array[i]) for i in range(n_prompt)]
@@ -5195,7 +5216,7 @@ class NativeLlamaClient:
                 thinking=thinking,
                 **({"tool_choice": tool_choice} if tool_choice != "auto" else {}),
             )
-            prompt = rendered.get("prompt")
+            prompt = prompt_from_render(rendered)
             if not isinstance(prompt, str) or not prompt:
                 raise RuntimeError("Orbit chat compatibility bridge returned an empty prompt")
             self._active_profile_render = rendered

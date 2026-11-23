@@ -53,6 +53,32 @@ them into the production consumer. Its wall time therefore is **not** current
 early-abort latency. JSON keeps `recorded_wall_seconds` separate from the current
 probe's `wall_seconds`; unavailable token counts remain `null`.
 
+The bounded ROUTE streaming consumer now retains non-JSON text until the backend
+returns a terminal result, matching the existing non-streaming direct-answer
+path. A prefix alone is not a CHAT decision. Empty/control-channel early stops,
+generation/context ceilings, incomplete-result rejection, canonical validation
+and the observer/scoring contract remain in force. Fenced code or malformed
+route syntax does not become qualified direct prose. An operational request
+answered with prose still counts as a missed execution.
+
+Plain-content operation authority now requires one complete known JSON route
+envelope, or one complete registered raw-tool envelope with matching argument
+shape. Embedded examples, Markdown fences, duplicate keys, multiple envelopes
+and unknown/nested decision containers cannot select an operation in either
+transport. Separately normalized backend tool calls retain their own authority
+and the same downstream terminal/canonical gates. The legacy content extractor
+remains available for diagnostics and tool handling; it is no longer sufficient
+to authorize a plain-content ROUTE operation. This is structural admission,
+not classification of user intent or a semantic correction.
+
+Replaying the unchanged historical recording through this consumer yields
+8/24, still FAIL, with 11 missed executions and zero unwanted authorizations.
+This is a new offline replay outcome; it does not rewrite the historical 5/24
+qualification, authorize a MiMo run or qualify any model. No frozen request,
+response, oracle or score rule was changed. A live run is still needed
+to measure a new runtime/model combination. Waiting for bounded terminal prose
+can take longer than cancelling on its first non-JSON character.
+
 ## Future model qualification
 
 Unregistered artifacts can first use the isolated, hash-pinned

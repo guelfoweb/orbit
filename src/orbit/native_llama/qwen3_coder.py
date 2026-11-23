@@ -31,6 +31,9 @@ def qwen3_coder_artifact_messages(messages: list[NativeMessage]) -> list[NativeM
 def qwen3_coder_artifact_prompt(rendered_prompt: str) -> str:
     if not rendered_prompt:
         raise RuntimeError("Qwen3-Coder artifact generation received an empty rendered prompt")
+    from .rendered_prompt import RenderedChatPrompt
+    if isinstance(rendered_prompt, RenderedChatPrompt):
+        return rendered_prompt.append_template(QWEN3_CODER_ARTIFACT_OPENING)
     return rendered_prompt + QWEN3_CODER_ARTIFACT_OPENING
 
 

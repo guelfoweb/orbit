@@ -9,6 +9,7 @@ from typing import Callable, Iterable
 
 from orbit.native_llama.bindings import LLAMA_LOAD_MODE_MMAP, GgmlLogCallback, LlamaLibrary
 from orbit.native_llama.gguf_split import is_secondary_shard, parse_split_name, split_problems
+from orbit.native_llama.profile_metadata import inspect_gguf_profile
 from orbit.terminal.theme import GREEN, RED, RESET, YELLOW
 from orbit.native_llama.model_profiles import (
     PROFILE_METADATA_KEYS,
@@ -142,12 +143,10 @@ def discover_models(
     )
 
     owned_inspector: NativeProfileInspector | None = None
-    if candidates and inspector is None and build_bin is not None:
-        try:
-            owned_inspector = NativeProfileInspector(build_bin)
-            inspector = owned_inspector
-        except (OSError, RuntimeError):
-            inspector = None
+    if candidates and inspector is None:
+        # Discovery must not bind the process to a native family before the
+        # operator selects a model. Weight loading still verifies the ABI.
+        inspector = inspect_gguf_profile
 
     try:
         inspections = tuple(_inspect(path, inspector) for path in candidates)

@@ -72,15 +72,26 @@ def _from_clean_git_checkout(root: Path) -> LlamaProvenance:
 
 
 def _from_payload(payload: object) -> LlamaProvenance:
-    if not isinstance(payload, dict) or payload.get("format") != 1:
+    if not isinstance(payload, dict) or type(payload.get("format")) is not int or payload["format"] not in (1, 2):
         raise RuntimeError("invalid llama.cpp provenance manifest")
-    required = (
-        "upstream_commit",
-        "upstream_tag",
-        "source_tree_sha256",
-        "patchset_sha256",
-    )
+    # Format 1 retains the imported historical patch attestation verbatim.
+    # Format 2 binds new builds to the reproducible V2 digest instead; any
+    # retained legacy digest is historical data anchored to its own commit.
+    digest_key = "patchset_sha256"
+    if payload["format"] == 2:
+        if payload.get("patchset_algorithm") != "orbit-patchset-v2":
+            raise RuntimeError("invalid canonical llama.cpp patchset algorithm")
+        digest_key = "patchset_v2_sha256"
+        if "patchset_sha256" in payload:
+            legacy = payload["patchset_sha256"]
+            anchor = payload.get("legacy_patchset_upstream_commit")
+            if not isinstance(legacy, str) or not re.fullmatch(r"[0-9a-f]{64}", legacy):
+                raise RuntimeError("invalid historical llama.cpp patchset attestation")
+            if not isinstance(anchor, str) or not re.fullmatch(r"[0-9a-f]{40}", anchor):
+                raise RuntimeError("missing historical llama.cpp patchset commit anchor")
+    required = ("upstream_commit", "upstream_tag", "source_tree_sha256")
     values = {key: payload.get(key) for key in required}
+    values["patchset_sha256"] = payload.get(digest_key)
     if any(not isinstance(value, str) or not value for value in values.values()):
         raise RuntimeError("incomplete llama.cpp provenance manifest")
     if not re.fullmatch(r"[0-9a-f]{40}", values["upstream_commit"]):
