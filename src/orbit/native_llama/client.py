@@ -343,8 +343,14 @@ class NativeLlamaClient:
             or self.config.mtp_accept_probe_enabled or self.config.mtp_decode_probe_enabled
         ):
             raise ValueError("research admission supports CPU-only, MTP-off qualification")
+        if getattr(paths, "accelerator", "cpu") not in ("cpu", "intel-gpu"):
+            raise ValueError("unknown acceleration selection")
+        gpu_requested = getattr(paths, "accelerator", "cpu") == "intel-gpu"
+        if gpu_requested and self.config.gpu_layers != -1:
+            raise ValueError("Intel GPU requires full GPU layer offload")
+        self._acceleration_status = {"requested": getattr(paths, "accelerator", "cpu"), "active": "cpu" if not self.config.gpu_layers else None, "device": "CPU" if not self.config.gpu_layers else None, "offloaded_layers": 0 if not self.config.gpu_layers else None}
         if getattr(paths, "abi_profile", "legacy") != "legacy":
-            if (self.config.gpu_layers or self.config.low_memory or self.config.use_mtp_experimental
+            if ((self.config.gpu_layers and not gpu_requested) or self.config.low_memory or self.config.use_mtp_experimental
                     or self.config.mtp_probe_enabled or self.config.mtp_dry_run_enabled
                     or self.config.mtp_accept_probe_enabled or self.config.mtp_decode_probe_enabled
                     or paths.mmproj_model is not None or paths.draft_mtp_model is not None):
@@ -352,7 +358,9 @@ class NativeLlamaClient:
             if _resolve_mtmd_bridge_path(paths) is None or _resolve_chat_bridge_path(paths) is None:
                 raise RuntimeError("isolated mainline family requires both identity-verified native bridges")
             # Verify both compiled bridge identities before any model/context setup.
-            validate_chat_bridge_artifact(paths.build_bin, _resolve_chat_bridge_path(paths))
+            bridge_identity = validate_chat_bridge_artifact(paths.build_bin, _resolve_chat_bridge_path(paths))
+            if gpu_requested and "libggml-vulkan.so" not in bridge_identity.get("libraries", {}):
+                raise RuntimeError("Intel GPU requires its identity-verified Vulkan library")
         abi_options = ({"abi_profile": paths.abi_profile}
                        if getattr(paths, "abi_profile", "legacy") != "legacy" else {})
         self.lib = LlamaLibrary(paths.build_bin, **abi_options)
@@ -624,6 +632,16 @@ class NativeLlamaClient:
 
         model_params = self._model_load_params(progress_cb)
         model_params.n_gpu_layers = self.config.gpu_layers
+        gpu_requested = getattr(self.paths, 'accelerator', 'cpu') == 'intel-gpu'
+        if gpu_requested:
+            from .acceleration import select_intel_device
+            device, device_name, description = select_intel_device(lib)
+            self._gpu_device_list = (c_void_p * 2)(device, None)
+            model_params.devices = cast(self._gpu_device_list, c_void_p)
+            model_params.use_extra_bufts = False
+            model_params.load_mode = LLAMA_LOAD_MODE_MMAP
+            self._cpu_repack_enabled = False
+
 
         self._model = lib.llama_model_load_from_file(str(self.paths.model).encode(), model_params)
         if not self._model:
@@ -632,6 +650,10 @@ class NativeLlamaClient:
         try:
             self._initialize_model_profile()
             self._validate_loaded_low_memory_profile()
+            if gpu_requested:
+                from .acceleration import loaded_intel_status
+                self._acceleration_status = loaded_intel_status(lib, self._model, device_name, description)
+
         except Exception:
             lib.llama_model_free(self._model)
             self._model = None
@@ -643,6 +665,9 @@ class NativeLlamaClient:
         ctx_params.n_ubatch = self.config.ubatch_size
         ctx_params.n_threads = self.config.threads
         ctx_params.n_threads_batch = self.config.threads_batch
+        if gpu_requested:
+            ctx_params.offload_kqv = True
+            ctx_params.op_offload = True
         ctx_params.n_outputs_max = 1 + MTP_DRAFT_N_MAX
         # Bounded recurrent rollback for the speculative tail. Zero unless MTP
         # was requested on an architecture that supports it, so ordinary

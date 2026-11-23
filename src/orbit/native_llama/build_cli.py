@@ -67,8 +67,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Reduce output to errors and final success summary.",
     )
-    parser.add_argument("--family", choices=("legacy", "mainline-support"), default="legacy",
+    parser.add_argument("--family", choices=("legacy", "mainline-support", "mainline-vulkan"), default="legacy",
                         help="Select the isolated native family to build.")
+    parser.add_argument("--glslc", help="Shader compiler for the optional Intel Vulkan family.")
     return parser
 
 

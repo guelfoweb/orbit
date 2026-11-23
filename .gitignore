@@ -46,3 +46,10 @@ src/orbit/native_llama/vendor/shim/orbit-mtp-completion
 # Each native family owns its generated artifacts.
 /src/orbit/native_llama/vendor/families/*/build/
 /src/orbit/native_llama/vendor/families/*/lib/
+
+/src/orbit/native_llama/vendor/families/mainline_vulkan/source/
+
+!src/orbit/native_llama/vendor/families/mainline_support/source/llama.cpp/src/models/
+!src/orbit/native_llama/vendor/families/mainline_support/source/llama.cpp/src/models/**
+!src/orbit/native_llama/vendor/families/mainline_support/source/llama.cpp/tools/mtmd/models/
+!src/orbit/native_llama/vendor/families/mainline_support/source/llama.cpp/tools/mtmd/models/**

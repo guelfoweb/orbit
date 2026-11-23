@@ -287,6 +287,32 @@ These dispositions carry forward ORBIT-TODO-PRIORITY-AUDIT-1 and the subsequent
   Evidence: `workdir/diag/reasoning_effort_1/` (native render/parity, GUI,
   matched speed cases, mutation outputs, source and core/full logs).
 
+### Optional Intel Vulkan execution (2026-11-23)
+
+- CPU remains the default. The optional `--accelerator intel-gpu` selects an
+  isolated `mainline-vulkan` native family for the mainline Inkling text backend;
+  MTP, multimodal and low-memory admission remain excluded. This is experimental
+  acceleration, not an extension of CPU model/tool/ANALYSIS qualification.
+- The local, untracked GUI offers CPU (default) / Intel GPU (experimental) at
+  model startup. Switching restarts only its owned server; readiness verifies
+  the chosen device, assigned layers and actual allocated GPU weight buffers.
+  Failed starts attempt to restore the previous owned selection. Foreign servers
+  remain untouched. GUI files are still not installed/published with Orbit.
+- Vulkan uses a hash-bound overlay on the unchanged mainline CPU source, separate
+  generated sources/libraries, the non-contiguous SCALE correction, and measured
+  Intel IQ expert-vector tuning. It requires glslc integer-dot-product support.
+  No driver or power-policy change is involved. CPU calibration and the CPU-only
+  aligned-prefix checkpoint policy are not reused for GPU.
+- The complete mainline model sources are now tracked: a broad `models/` ignore
+  rule previously excluded them from clean checkouts. Their restored tree matches
+  the existing attested CPU source SHA256 `10942fabccef1059a35a929c2636756c245a8ddbd086a4979f3103a8c516c123`.
+- The historical Ornith Intel GPU technical stop remains valid for its measured
+  backend/workload. New Inkling/Vulkan observations do not overturn it generally.
+  Preserve `workdir/diag/inkling_vulkan_scale_1/`,
+  `workdir/diag/inkling_vulkan_profile_1/` and
+  `workdir/diag/intel_vulkan_integration_1/`. No IQ3 24-intent gate is resumed or
+  capability approval implied; the operator's manual-testing disposition remains.
+
 ## Historical machine-migration handoff (2026-09-13)
 
 The following migration record is retained as written. Its release, Git state,

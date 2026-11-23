@@ -1,0 +1,25 @@
+{
+  "base_source_tree_sha256": "10942fabccef1059a35a929c2636756c245a8ddbd086a4979f3103a8c516c123",
+  "files": [
+    {
+      "path": "ggml/src/ggml-vulkan/ggml-vulkan.cpp",
+      "base_sha256": "6028145a333b821846e38773fa8a2a826b8d0f9586f4423b2e9af3e9b3cd16e0",
+      "overlay_sha256": "c0459894ea1ecbc527c8700dbd94755dab8fa056db8e8a01edc90011d91de3e8"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/scale.comp",
+      "base_sha256": "6a5f6d54b1cc0e4218c999442265b1c6c84d717933feae98a7f9cf2cf14038ba",
+      "overlay_sha256": "cca34fc9d7d2bb076fd9c8c6caa30de5035042f97d130fe2089a82ab14c6bf0c"
+    },
+    {
+      "path": "include/llama.h",
+      "base_sha256": "81de282d3c3a6e74f876c5954749efc9aabd3dd3fd3014479d5194cb4381298b",
+      "overlay_sha256": "3759924212067451fd8fe22376128b0c2aee5e3619224d5a5b03a9b79c0c35c5"
+    },
+    {
+      "path": "src/llama-model.cpp",
+      "base_sha256": "b314f00a93b339de2d8249c797199ceb88aa7f0cb9d036b92a3fa95340b18d0f",
+      "overlay_sha256": "923e35c3979b8a2c8a64a94cd0435fa73c0b952eb88180cabba2467e4eda6069"
+    }
+  ]
+}
