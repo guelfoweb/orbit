@@ -30,8 +30,12 @@ class RetryBackend:
                     on_delta=None, on_progress=None):
         self.calls.append(copy.deepcopy(messages))
         if len(self.calls) == 1:
-            on_delta("TRANSIENT route prose")  # Real route filter aborts this.
-            raise AssertionError("route prose should have been aborted")
+            on_delta("TRANSIENT route prose")
+            return ChatResult(content="TRANSIENT route prose", model="fake",
+                              finish_reason="length", tool_calls=[],
+                              prompt_tokens=100, completion_tokens=max_tokens,
+                              cached_tokens=0, prompt_tokens_per_second=None,
+                              generation_tokens_per_second=None)
         on_delta("CEDAR")
         return ChatResult(content="CEDAR", model="fake", finish_reason="stop",
                           tool_calls=[], prompt_tokens=100, completion_tokens=2,

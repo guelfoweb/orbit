@@ -74,6 +74,7 @@ This list is not a performance ranking.
 | Qwen3-Coder 30B-A3B Instruct | Q4_K_M |
 | Qwen3.8 27B | Q4_K_M |
 | Qwen3.8 Flash Next | UD-IQ1_M, three shards |
+| Inkling 2 Mini (Mainline Support) | UD-Q4_K_M |
 
 **Backend/CHAT qualification is separate from ANALYSIS semantic qualification.**
 A working model integration and valid tool calls do not establish that its
@@ -91,6 +92,30 @@ See the [qualification scope](docs/ANALYSIS_QUALIFICATION.md) and
 [semantic baseline](docs/ANALYSIS_SEMANTIC_BASELINE.md) for evidence and limits.
 No model in this table is presented as generally semantically qualified for
 ANALYSIS.
+
+## Inkling 2 Mini
+
+Inkling uses a separate CPU/text backend family. Build it alongside the default
+backend; the existing models keep their original backend:
+
+```bash
+python3 scripts/build_native.py --family mainline-support --jobs 4
+orbit download unsloth/Inkling-2-Mini-GGUF --models-dir /srv/orbit-models
+orbit server --model-id inkling2-mini-ud-q4-k-m --models-dir /srv/orbit-models --ctx 8192 --threads 6 --threads-batch 6 --batch 256 --ubatch 128 --think off --repack off
+```
+
+Change `--models-dir` to your configured model store. The registered download is
+pinned to the Mainline_Support artifact, saved locally with a `.gguf` extension.
+The tested artifact is 16,610,544,608 bytes, SHA256
+`78fcedcf93c5d1bfe83e225513b71392bb52259be0eaa5f8899c856a2e5834ae`.
+
+This profile does not use MTP, GPU offload or multimodal input. Its internal
+reasoning remains active even with `--think off`; Orbit separates that reasoning
+from visible answers and reserves the declared decision budget. The tested
+configuration passed five manually reviewed CHAT observations and the frozen
+24-case tool-intent gate, with the executor intercepted. This qualifies tool
+intent and protocol handling, not generated-code correctness or ANALYSIS
+semantics. No general performance claim follows from these observations.
 
 ## Chat and tools
 

@@ -30,6 +30,8 @@ DownloadProgress = Callable[[int, int], None]
 class DownloadRequest:
     repo: str
     file: str
+    remote_file: str | None = None
+    revision: str = "main"
 
 
 @dataclass(frozen=True)
@@ -64,12 +66,16 @@ def parse_huggingface_spec(spec: str, *, prefer: str = "target") -> DownloadRequ
     if file_part:
         if not file_part.endswith(".gguf"):
             raise ValueError("only explicit .gguf files are supported")
+        for manifest in load_registry():
+            for entry in (manifest.target, manifest.mmproj, manifest.mtp):
+                if entry is not None and entry.repo == repo and entry.file == file_part:
+                    return _request_for_file(entry)
         return DownloadRequest(repo=repo, file=file_part)
 
     manifest_match = _find_manifest_file_for_repo(repo, prefer=prefer)
     if manifest_match is None:
         raise ValueError(f"repo requires an explicit .gguf file: {repo}")
-    return DownloadRequest(repo=manifest_match.repo, file=manifest_match.file)
+    return _request_for_file(manifest_match)
 
 
 def download_model(
@@ -93,6 +99,8 @@ def download_model(
         models_dir=models_dir or effective_models_dir(),
     )
     split = parse_split_name(request.file)  # raises on a malformed split name
+    if split is not None and request.remote_file is not None:
+        raise ValueError("remote filename mapping supports single-file GGUF only")
     if split is not None:
         return _download_split_set(request, split, destination, progress=progress, opener=opener, on_shard=on_shard)
     url = huggingface_resolve_url(request)
@@ -127,7 +135,7 @@ def _download_split_set(request, split, requested: Path, *, progress, opener, on
     first = shards[0]
     fetched: list[tuple[int, Path]] = []
     for position, shard in enumerate(shards, start=1):
-        sibling_request = DownloadRequest(repo=request.repo, file=f"{prefix}{shard.name}")
+        sibling_request = DownloadRequest(repo=request.repo, file=f"{prefix}{shard.name}", revision=request.revision)
         url = huggingface_resolve_url(sibling_request)
         if shard.exists() and _shard_is_sound(shard, position - 1, split.count):
             _notify(on_shard, position, split.count, shard.name, "present")
@@ -152,7 +160,7 @@ def _download_split_set(request, split, requested: Path, *, progress, opener, on
                 shard.unlink(missing_ok=True)
         raise ValueError("split GGUF set is not consistent: " + "; ".join(validation.problems))
     return DownloadResult(path=first, downloaded=bool(fetched), url=huggingface_resolve_url(
-        DownloadRequest(repo=request.repo, file=f"{prefix}{first.name}")), shards=shards)
+        DownloadRequest(repo=request.repo, file=f"{prefix}{first.name}", revision=request.revision)), shards=shards)
 
 
 def _notify(on_shard, index: int, count: int, name: str, action: str) -> None:
@@ -462,8 +470,12 @@ def download_all_for_repo(
     return DownloadBatchResult(results=results)
 
 
+def _request_for_file(spec: ModelFileSpec) -> DownloadRequest:
+    return DownloadRequest(spec.repo, spec.file, spec.remote_file, spec.revision)
+
+
 def huggingface_resolve_url(request: DownloadRequest) -> str:
-    return f"{HF_RESOLVE_BASE}/{request.repo}/resolve/main/{request.file}"
+    return f"{HF_RESOLVE_BASE}/{request.repo}/resolve/{request.revision}/{request.remote_file or request.file}"
 
 
 def _find_manifest_file_for_repo(repo: str, *, prefer: str = "target") -> ModelFileSpec | None:

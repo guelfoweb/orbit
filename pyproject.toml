@@ -24,4 +24,9 @@ where = ["src"]
   "vendor/lib/*",
   "vendor/shim/*",
   "vendor/source/llama.cpp/**/*",
+  "vendor/LLAMA_PROVENANCE.json",
+  "vendor/families/*/LLAMA_PROVENANCE.json",
+  "vendor/families/*/shim/*.cpp",
+  "vendor/families/*/source/llama.cpp/**/*",
+  "vendor/families/*/lib/*",
 ]

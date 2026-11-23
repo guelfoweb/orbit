@@ -8,6 +8,10 @@ from typing import Mapping
 from .model_contract import ReasoningBehavior, TEXT_CAPABILITIES, reasoning_enabled
 
 
+INKLING2_PROFILE_ID = "orbit-inkling2-mini-native-v1"
+INKLING2_TEMPLATE_SHA256 = '53a9035f3255945704b5857657cfb00c1165090c0641c4f782a0cbf268cc16dc'
+INKLING2_METADATA = MappingProxyType({'general.name': 'Inkling-2-Mini', 'general.architecture': 'inkling2_loop', 'general.file_type': '15', 'general.quantization_version': '2', 'tokenizer.ggml.model': 'gpt2', 'tokenizer.ggml.pre': 'inkling2', 'tokenizer.ggml.eos_token_id': '200006', 'tokenizer.ggml.eot_token_id': '200006', 'tokenizer.ggml.add_bos_token': 'false', 'tokenizer.ggml.add_eos_token': 'false', 'inkling2_loop.block_count': '24', 'inkling2_loop.loop.count': '3', 'inkling2_loop.loop.start': '6', 'inkling2_loop.loop.end': '18', 'inkling2_loop.expert_count': '128', 'inkling2_loop.expert_used_count': '8'})
+
 GEMMA4_PROFILE_ID = "orbit-gemma4-native-v1"
 GEMMA4_VERIFIED_MODEL_NAME = "gemma-4-26B-A4B-it"
 QWEN36_PROFILE_ID = "orbit-qwen36-native-v1"
@@ -63,6 +67,8 @@ PROFILE_METADATA_KEYS = frozenset(
         "qwen4exp.expert_used_count",
     }
 )
+
+PROFILE_METADATA_KEYS = PROFILE_METADATA_KEYS | frozenset(INKLING2_METADATA)
 
 ORNITH15_PROFILE_ID = "orbit-ornith15-native-v1"
 ORNITH15_VERIFIED_MODEL_NAME = "Ornith-1.5-35B"
@@ -220,9 +226,11 @@ class VerifiedNativeModelIdentity:
     # A frozenset of pairs has neither problem: hashable, and it distinguishes.
     # `artifact_capability_map()` reads it back as a mapping.
     artifact_capabilities: frozenset[tuple[str, frozenset[str]]] = frozenset()
+    native_family: str = "legacy"
 
 
 VERIFIED_NATIVE_MODEL_IDENTITIES = (
+    VerifiedNativeModelIdentity(INKLING2_PROFILE_ID, "Inkling-2-Mini", "inkling2_loop", native_family="mainline-support"),
     VerifiedNativeModelIdentity(GEMMA4_PROFILE_ID, GEMMA4_VERIFIED_MODEL_NAME, "gemma4"),
     VerifiedNativeModelIdentity(QWEN36_PROFILE_ID, QWEN36_VERIFIED_MODEL_NAME, "qwen35moe"),
     VerifiedNativeModelIdentity(
@@ -266,6 +274,20 @@ def detect_native_model_profile(metadata: Mapping[str, str], template: str) -> N
     model_name = metadata.get("general.name", "").strip()
     file_type = metadata.get("general.file_type", "").strip()
     template_hash = hashlib.sha256(template.encode("utf-8")).hexdigest()
+
+    if (all(metadata.get(key, "").strip() == expected for key, expected in INKLING2_METADATA.items())
+            and template_hash == INKLING2_TEMPLATE_SHA256):
+        return NativeModelProfile(
+            profile_id=INKLING2_PROFILE_ID, family="inkling2", model_name=model_name,
+            architecture=architecture, renderer="llama.cpp-jinja",
+            reasoning_protocol="inkling2-content-thinking", tool_call_protocol="inkling2-native",
+            history_serialization="preserve", verified=True, failure_reason=None,
+            template_source="gguf-embedded-official", template_sha256=template_hash,
+            thinking_supported=True, reasoning_behavior=ReasoningBehavior.ALWAYS,
+            separated_reasoning=True, mtp_supported=False, gemma_prefix_reuse_supported=False,
+            verified_quantization="UD-Q4_K_M",
+            supported_capabilities=frozenset({"chat", "tools"}),
+        )
 
     if architecture == "gemma4" and tokenizer_model == "gemma4":
         return NativeModelProfile(

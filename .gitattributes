@@ -1,0 +1,6 @@
+
+# Preserve the pinned third-party source bytes used by native provenance.
+# Imported EOF blanks are not authored style changes; patch context blanks
+# are part of the patch format and cannot be stripped safely.
+src/orbit/native_llama/vendor/families/mainline_support/source/llama.cpp/** whitespace=-blank-at-eof
+src/orbit/native_llama/vendor/families/mainline_support/source/llama.cpp/vendor/nlohmann/json-deep-nesting.patch whitespace=-blank-at-eof,-blank-at-eol

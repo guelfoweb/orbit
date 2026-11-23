@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import unittest
 
-from orbit.native_llama.bindings import LlamaLibrary
+from orbit.native_llama.bindings import LlamaLibrary, context_params_type
 
 
 class _Symbol:
@@ -75,9 +75,12 @@ class NativeBindingsTests(unittest.TestCase):
         library.build_bin = Path(".")
         library._handles = []
         library.lib = _stub_library()
+        library.context_params_type = context_params_type('legacy')
 
         LlamaLibrary._configure_api(library)
 
+        self.assertIs(library.lib.llama_context_default_params.restype, library.context_params_type)
+        self.assertIs(library.lib.llama_init_from_model.argtypes[1], library.context_params_type)
         self.assertEqual(len(library.lib.llama_set_n_threads.argtypes), 3)
         self.assertEqual(len(library.lib.llama_n_threads.argtypes), 1)
         self.assertEqual(len(library.lib.llama_n_threads_batch.argtypes), 1)

@@ -17,6 +17,7 @@ from orbit.runtime.command_request import (
     classify_route_output,
     decision_tool_names,
     parse_command_decision,
+    parse_route_decision,
     parse_command_decision_from_tool_calls,
     parse_tool_command,
     command_stream_state,
@@ -27,6 +28,32 @@ from orbit.runtime.command_request import (
 
 
 class RouteRequestTests(unittest.TestCase):
+    def test_route_authority_requires_whole_known_envelope(self):
+        for text in ('Example configuration:\n{"command":"echo example"}',
+                     '```json\n{"command":"echo example"}\n```',
+                     'Do not execute: {"command":"echo example"}',
+                     '{"example":{"command":"echo example"}}',
+                     '{"command":"echo first"} {"command":"echo second"}',
+                     '{"command":"echo first","command":"echo second"}',
+                     '{"route":"ANALYSIS","artifact":"notes.txt","command":"echo example"}',
+                     '{"route":"ANALYSIS","artifact":"notes.txt","url":"https://example.com"}',
+                     '<|tool_call>call:shell{"command":"pwd"}',
+                     '<|tool_call>call:unknown{"command":"pwd"}<tool_call|>',
+                     '<|tool_call>call:fetch_url{"command":"pwd"}<tool_call|>'):
+            with self.subTest(text=text):
+                self.assertIsNone(parse_route_decision(text))
+
+    def test_route_authority_preserves_complete_supported_decisions(self):
+        for text in ('{"command":"pwd"}', '{ "command": "pwd" }',
+                     '{"route":"CHAT"}', '{"route":"ANALYSIS","artifact":"notes.txt"}',
+                     '{"url":"https://example.com"}', '{"path":"."}',
+                     '{"include_os":true}',
+                     '{"tool":"write_artifact","arguments":{"path":"x.txt"}}'):
+            with self.subTest(text=text):
+                self.assertEqual(parse_route_decision(text), parse_command_decision(text))
+        self.assertEqual(parse_route_decision('<|tool_call>call:shell{"command":"pwd"}<tool_call|>').tool_names,
+                         ('exec_shell_full_command',))
+
     def _classify(
         self,
         content: str,

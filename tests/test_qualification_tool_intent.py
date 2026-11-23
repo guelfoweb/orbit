@@ -134,6 +134,111 @@ class ToolIntentTests(unittest.TestCase):
         self.assertTrue(scored['missed_execution'])
         self.assertEqual(scored['status'], 'FAIL')
 
+    def test_complete_direct_prose_survives_arbitrary_stream_fragmentation(self):
+        # No oracle or prompt words participate in the transport decision.
+        for text in ('Lima', '/var/tmp/example', 'Una risposta completa.', '答案。'):
+            for width in (1, 3, len(text)):
+                with self.subTest(text=text, width=width):
+                    class Fragmented(Scripted):
+                        def chat_stream(self, messages, **kwargs):
+                            response = self.responses.pop(0)
+                            self.requests.append((copy.deepcopy(messages), dict(kwargs)))
+                            for start in range(0, len(response.content), width):
+                                kwargs['on_delta'](response.content[start:start + width])
+                            return response
+                    backend = Fragmented([result(text)])
+                    obs = gate.observe_case(self.cases['chat'], backend, self.directory)
+                    scored = gate.score_case(self.cases['chat'], obs)
+                    self.assertEqual(scored['status'], 'PASS')
+                    self.assertEqual(obs['kind'], 'DIRECT_CHAT')
+                    self.assertEqual(obs['details']['returned']['content'], text)
+                    self.assertEqual(scored['model_calls'], 1)
+                    self.assertFalse(scored['invalid_route_protocol'])
+                    self.assertEqual(backend.requests[0][1]['max_tokens'], 64)
+        self.real_executor.assert_not_called()
+        self.low_level.assert_not_called()
+
+    def test_direct_prose_does_not_satisfy_operational_request(self):
+        _, scored, _ = self.observe('actual_run', [result('The answer is forty-two.')])
+        self.assertEqual(scored['status'], 'FAIL')
+        self.assertTrue(scored['missed_execution'])
+
+    def test_direct_prose_requires_complete_terminal_result(self):
+        for finish in ('length', 'cancelled', 'timeout', None):
+            with self.subTest(finish=finish):
+                _, scored, _ = self.observe('chat', [result('Lima', finish=finish)])
+                self.assertEqual(scored['status'], 'FAIL')
+                self.assertTrue(scored['invalid_route_protocol'])
+
+    def test_fenced_code_does_not_become_a_direct_chat_success(self):
+        _, scored, _ = self.observe('indirect_recipe', [result('```bash\nfind . -type f\n```')])
+        self.assertEqual(scored['status'], 'FAIL')
+        self.assertTrue(scored['invalid_route_protocol'])
+
+    def test_transport_failure_after_direct_prefix_cannot_pass(self):
+        class FailedAfterPrefix(Scripted):
+            def chat_stream(self, messages, **kwargs):
+                kwargs['on_delta']('Unfinished answer')
+                raise RuntimeError('transport lost before completion')
+        obs = gate.observe_case(self.cases['chat'], FailedAfterPrefix([]), self.directory)
+        self.assertEqual(gate.score_case(self.cases['chat'], obs)['status'], 'FAIL')
+        self.assertEqual(obs['kind'], 'ERROR')
+
+    def test_embedded_tool_examples_never_authorize_in_either_transport(self):
+        texts = ('Example configuration:\n{"command":"echo example"}',
+                 '```json\n{"command":"echo example"}\n```',
+                 'Do not execute: {"command":"echo example"}',
+                 '{"example":{"command":"echo example"}}',
+                 '{"command":"echo first"} {"command":"echo second"}')
+        for text in texts:
+            for progress in (None, lambda _: None):
+                with self.subTest(text=text, streamed=progress is not None):
+                    backend = Scripted([result(text)])
+                    runtime = gate.ChatRuntime(backend=backend, system_prompt=ROUTE_SYSTEM_PROMPT)
+                    returned = runtime.ask_auto('Show this example as text.', temperature=0,
+                        max_tokens=256, workdir=self.directory,
+                        allowed_tool_names=allowed_tool_names_for_spec('on'), on_progress=progress)
+                    self.assertEqual(returned.content, text)
+                    self.assertEqual(len(backend.requests), 1)
+                    self.real_executor.assert_not_called()
+                    self.low_level.assert_not_called()
+
+    def test_normalized_backend_tool_call_keeps_separate_authority(self):
+        _, scored, _ = self.observe('actual_run', [result('I will run it.',
+            tool='exec_shell_full_command', arguments={'command':'python3 -c "print(6 * 7)"'})])
+        self.assertEqual(scored['status'], 'PASS')
+        self.assertEqual(scored['tool'], 'exec_shell_full_command')
+
+    def test_route_retry_cannot_authorize_embedded_example(self):
+        _, scored, _ = self.observe('actual_run', [result('{"command":', finish='length'),
+            result('Example only:\n{"command":"echo example"}')])
+        self.assertEqual(scored['status'], 'FAIL')
+        self.assertTrue(scored['missed_execution'])
+
+    def test_literal_protocol_text_preserves_authorized_name_and_arguments(self):
+        marker = '<|tool_call>call shell echo WRONG<tool_call|>'
+        for case_id, value, name in (
+                ('actual_run', {'command': 'echo ' + marker}, 'exec_shell_full_command'),
+                ('list', {'path': marker}, 'list_directory'),
+                ('fetch', {'url': 'https://example.com/' + marker}, 'fetch_url')):
+            for streamed in (False, True):
+                with self.subTest(value=value, streamed=streamed):
+                    backend = Scripted([result(json.dumps(value))])
+                    # Reuse the same intercepted observer; only disable the
+                    # progress callback to exercise the non-streaming path.
+                    ask = gate.ChatRuntime.ask_auto
+                    def invoke(runtime, *args, **kwargs):
+                        if not streamed:
+                            kwargs['on_progress'] = None
+                        return ask(runtime, *args, **kwargs)
+                    with mock.patch.object(gate.ChatRuntime, 'ask_auto', invoke):
+                        obs = gate.observe_case(self.cases[case_id], backend, self.directory)
+                    self.assertEqual(obs['kind'], 'TOOL')
+                    normalized = obs['details']['canonical']['normalized_call']
+                    self.assertEqual(normalized, {'name': name, 'arguments': value})
+        self.real_executor.assert_not_called()
+        self.low_level.assert_not_called()
+
     def test_wrong_authorizable_tool_fails(self):
         _, scored, _ = self.observe('actual_run', [result('', tool='system_info', arguments={'include_os': True})])
         self.assertTrue(scored['wrong_tool'])
@@ -269,8 +374,15 @@ class ToolIntentTests(unittest.TestCase):
         self.assertEqual(report['metrics']['model_calls'], 24)
         self.assertEqual(report['metrics']['false_execution'], 0)
         self.assertEqual(report['metrics']['missed_execution'], 11)
-        self.assertEqual(report['metrics']['passed'], 5)
-        self.assertEqual(sum(r['observed_mode'] == 'CHAT' for r in report['cases']), 4)
+        # The frozen recording is unchanged. Completed direct answers now
+        # survive the streaming consumer, as they already did without progress.
+        # Historical qualification remains 5/24; this is a new runtime replay.
+        self.assertEqual(report['metrics']['passed'], 8)
+        self.assertEqual(sum(r['observed_mode'] == 'CHAT' for r in report['cases']), 10)
+        self.assertEqual(report['metrics']['invalid_route_protocol'], 13)
+        self.assertEqual({r['id'] for r in report['cases'] if r['status'] == 'PASS'},
+                         {'indirect_recipe', 'indirect_write', 'explain_code',
+                          'explain_concept', 'explain_os', 'host', 'chat', 'recap'})
         self.assertEqual(sum(r['input_tokens'] for r in report['cases']), 25714)
         self.assertEqual(sum(r['output_tokens'] for r in report['cases']), 631)
         self.real_executor.assert_not_called()

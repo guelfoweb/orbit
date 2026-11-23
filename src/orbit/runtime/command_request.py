@@ -159,6 +159,59 @@ def _looks_like_route_syntax(text: str) -> bool:
     return any(marker in text for marker in ('{"route"', '{"command"', '{"url"', '{"path"', '{"include_', '{"tool"'))
 
 
+@dataclass(frozen=True)
+class RouteContentAdmission:
+    decision: RouteDecision
+    tool_call: dict[str, Any] | None = None
+
+
+def admit_route_content(content: str) -> RouteContentAdmission | None:
+    """Decode a whole known envelope once; never rescan its string values."""
+    candidate = content.strip()
+    wrapper_name = None
+    if candidate.startswith("<|tool_call>"):
+        match = re.fullmatch(
+            r"<\|tool_call>\s*call:([A-Za-z0-9_-]+)\s*(\{.*\})\s*<tool_call\|>",
+            candidate, flags=re.DOTALL,
+        )
+        if match is None:
+            return None
+        wrapper_name, candidate = match.groups()
+    try:
+        value = json.loads(candidate, object_pairs_hook=_unique_json_object)
+    except (json.JSONDecodeError, _DuplicateJsonKey):
+        return None
+    if not isinstance(value, dict):
+        return None
+    reason = _canonical_route_reason(candidate)
+    if wrapper_name is not None:
+        kinds = {**dict.fromkeys(SHELL_TOOL_ALIASES, "canonical_command"),
+                 **dict.fromkeys(FETCH_URL_TOOL_ALIASES, "canonical_url"),
+                 **dict.fromkeys(LIST_DIRECTORY_TOOL_ALIASES, "canonical_list_directory"),
+                 **dict.fromkeys(SYSTEM_INFO_TOOL_ALIASES, "canonical_system_info")}
+        if wrapper_name not in kinds or reason != kinds[wrapper_name]:
+            return None
+    if reason == "canonical_chat":
+        return RouteContentAdmission(RouteDecision(ToolRoute.CHAT))
+    if (wrapper_name is None and set(value) == {"route", "artifact"}
+            and value.get("route") == ToolRoute.ANALYSIS.value and _has_analysis_route(value)):
+        return RouteContentAdmission(_analysis_decision(value))
+    names = {"canonical_command": "exec_shell_full_command", "canonical_url": "fetch_url",
+             "canonical_list_directory": "list_directory", "canonical_system_info": "system_info",
+             "canonical_artifact": "write_artifact"}
+    name = names.get(reason)
+    if name is None:
+        return None
+    arguments = value["arguments"] if reason == "canonical_artifact" else value
+    return RouteContentAdmission(RouteDecision(ToolRoute.FILESYSTEM, (name,)),
+                                 _tool_call(name, arguments))
+
+
+def parse_route_decision(content: str) -> RouteDecision | None:
+    admission = admit_route_content(content)
+    return admission.decision if admission is not None else None
+
+
 def parse_tool_command(content: str) -> ToolRoute | None:
     decision = parse_command_decision(content)
     return decision.route if decision is not None else None

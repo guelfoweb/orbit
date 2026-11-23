@@ -26,9 +26,10 @@ def build_chat_bridge(
     build_dir: Path,
     build_bin: Path,
     runner=subprocess.run,
+    shim_source: Path | None = None,
 ) -> tuple[Path, LlamaProvenance]:
     provenance = load_llama_provenance(llama_root)
-    source = Path(__file__).parent / "vendor" / "shim" / "orbit_chat_bridge.cpp"
+    source = shim_source or Path(__file__).parent / "vendor" / "shim" / "orbit_chat_bridge.cpp"
     output = build_dir / chat_bridge_filename()
     identity = _build_identity(
         source=source,

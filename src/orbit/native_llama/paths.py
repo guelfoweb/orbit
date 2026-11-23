@@ -5,8 +5,9 @@ import os
 from pathlib import Path
 
 from .build_support import PACKAGE_NATIVE_ROOT
-from .model_registry import ResolvedModel, get_manifest, resolve_model
+from .model_registry import ResolvedModel, get_manifest, resolve_model, load_registry
 from .native_names import runtime_library_filename
+from .native_families import native_family
 
 
 DEFAULT_VENDOR_LIB_DIR = PACKAGE_NATIVE_ROOT / "lib"
@@ -33,6 +34,7 @@ class NativeLlamaPaths:
     mtp_available: bool = False
     fallback_reason: str | None = None
     model_id: str = DEFAULT_MODEL_ID
+    abi_profile: str = "legacy"
 
 
 def resolve_paths(
@@ -44,9 +46,13 @@ def resolve_paths(
     models_dir: Path | None = None,
     hf_cache: Path | None = None,
 ) -> NativeLlamaPaths:
-    source_root = _resolve_build_source_root(llama_root)
-    _runtime_llama_root, build_bin, library = _resolve_native_runtime(llama_root)
     manifest = get_manifest(model_id)
+    family = native_family(manifest.native_family)
+    if family.name != "legacy" and mmproj is not None:
+        raise ValueError("isolated mainline family supports text-only models")
+    source_root = (_resolve_build_source_root(llama_root) if family.name == "legacy"
+                   else family.root / "source" / "llama.cpp")
+    _runtime_llama_root, build_bin, library = _resolve_native_runtime(llama_root, family_name=family.name)
     resolved = _resolve_model(
         manifest_id=model_id,
         model_override=model,
@@ -67,6 +73,7 @@ def resolve_paths(
         mtp_available=resolved.mtp_available,
         fallback_reason=resolved.fallback_reason,
         model_id=manifest.id,
+        abi_profile=family.abi_profile,
     )
 
 
@@ -76,12 +83,25 @@ def resolve_legacy_paths(
     model: Path,
     mmproj: Path | None = None,
 ) -> NativeLlamaPaths:
-    source_root = _resolve_build_source_root(llama_root)
-    _runtime_llama_root, build_bin, library = _resolve_native_runtime(llama_root)
     resolved_model = model.expanduser().resolve()
 
     if not resolved_model.exists():
         raise FileNotFoundError(f"model not found: {resolved_model}")
+    family_name = "legacy"
+    from .profile_metadata import inspect_gguf_profile
+    try:
+        profile = inspect_gguf_profile(resolved_model)
+        if profile.verified:
+            family_name = next((m.native_family for m in load_registry()
+                                if m.profile_id == profile.profile_id), "legacy")
+    except (OSError, ValueError):
+        pass
+    family = native_family(family_name)
+    source_root = (_resolve_build_source_root(llama_root) if family.name == "legacy"
+                   else family.root / "source" / "llama.cpp")
+    _runtime_llama_root, build_bin, library = _resolve_native_runtime(llama_root, family_name=family.name)
+    if family.name != "legacy" and mmproj is not None:
+        raise ValueError("isolated mainline family supports text-only models")
     resolved_mmproj = None if mmproj is None else mmproj.expanduser().resolve()
     if resolved_mmproj is not None and not resolved_mmproj.exists():
         raise FileNotFoundError(f"mmproj not found: {resolved_mmproj}")
@@ -98,6 +118,7 @@ def resolve_legacy_paths(
         mtp_available=False,
         fallback_reason="legacy-model-path",
         model_id=LEGACY_MODEL_ID,
+        abi_profile=family.abi_profile,
     )
 
 
@@ -124,8 +145,14 @@ def _resolve_model(
     )
 
 
-def _resolve_native_runtime(llama_root: Path | None) -> tuple[Path | None, Path, Path]:
+def _resolve_native_runtime(llama_root: Path | None, *, family_name: str = "legacy") -> tuple[Path | None, Path, Path]:
     library_name = runtime_library_filename("llama")
+    family = native_family(family_name)
+    if family.name != "legacy":
+        for folder in (family.root / "build" / "llama.cpp" / "bin", family.root / "lib"):
+            if (folder / library_name).exists():
+                return family.root / "source" / "llama.cpp", folder, folder / library_name
+        raise FileNotFoundError(f"native family {family.name} is not built; run python3 scripts/build_native.py --family {family.name}")
     vendored_soname_library = DEFAULT_VENDOR_BUILD_BIN / library_name
     if _has_packaged_soname_runtime(DEFAULT_VENDOR_BUILD_BIN) and vendored_soname_library.exists():
         return None, DEFAULT_VENDOR_BUILD_BIN, vendored_soname_library

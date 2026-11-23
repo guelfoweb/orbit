@@ -6886,7 +6886,7 @@ EOF"""
         self.assertEqual(backend.chat_calls, 0)
         self.assertEqual(backend.chat_stream_calls, 2)
 
-    def test_ask_auto_aborts_streamed_route_prose_and_streams_final_retry(self) -> None:
+    def test_ask_auto_retains_completed_streamed_route_prose_without_retry(self) -> None:
         class StreamingRouteAnswerBackend:
             def __init__(self) -> None:
                 self.chat_calls = 0
@@ -6903,6 +6903,8 @@ EOF"""
                 on_progress(type("P", (), {"phase": "generation", "current": 12, "total": 128, "percent": 9})())
                 if self.chat_stream_calls == 1:
                     on_delta("plain route prose")
+                    if emitted:
+                        raise AssertionError("route prefix leaked before terminal completion")
                     return ChatResult(
                         content="plain route prose",
                         model="fake",
@@ -6944,12 +6946,12 @@ EOF"""
             allowed_tool_names=("exec_shell_full_command",),
         )
 
-        self.assertEqual(result.content, "final answer")
-        self.assertEqual(emitted, ["final answer"])
-        self.assertIn(("chat_final_retry", "route_not_command"), phases)
-        self.assertEqual(progress, [("generation", 12, 128, 9), ("generation", 12, 128, 9)])
+        self.assertEqual(result.content, "plain route prose")
+        self.assertEqual(emitted, ["plain route prose"])
+        self.assertNotIn(("chat_final_retry", "route_not_command"), phases)
+        self.assertEqual(progress, [("generation", 12, 128, 9)])
         self.assertEqual(backend.chat_calls, 0)
-        self.assertEqual(backend.chat_stream_calls, 2)
+        self.assertEqual(backend.chat_stream_calls, 1)
 
     def test_route_stream_abort_stops_whitespace_only_route(self) -> None:
         route_filter = _RouteDecisionStreamAbort()
@@ -6966,6 +6968,14 @@ EOF"""
         for _ in range(3):
             route_filter.write(" ")
         route_filter.write("{")
+
+    def test_route_stream_abort_retains_fragmented_control_channel_guard(self) -> None:
+        for chunks in (("<|channel>thought",), tuple("<|channel>thought")):
+            with self.subTest(chunks=chunks):
+                route_filter = _RouteDecisionStreamAbort()
+                with self.assertRaises(_RouteNotCommandAbort):
+                    for text in chunks:
+                        route_filter.write(text)
 
     def test_ask_auto_discards_route_thought_and_runs_chat_final(self) -> None:
         class StreamingRouteThoughtBackend:

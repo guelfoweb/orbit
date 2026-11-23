@@ -50,6 +50,7 @@ LLAMA_LAZY_MODE_ON = 2
 _CDLL_CACHE: dict[tuple[str, int], CDLL] = {}
 _RUNTIME_FAMILY_LOCK = threading.Lock()
 _RUNTIME_FAMILY_ROOT: Path | None = None
+_RUNTIME_ABI_PROFILE: str | None = None
 
 
 def native_cdll_flags() -> int:
@@ -69,9 +70,9 @@ def load_native_cdll(path: Path, *, mode: int) -> CDLL:
     return lib
 
 
-def _claim_runtime_family(build_bin: Path) -> Path:
+def _claim_runtime_family(build_bin: Path, *, abi_profile: str | None = None) -> Path:
     """Bind this process to one co-located llama/ggml runtime family."""
-    global _RUNTIME_FAMILY_ROOT
+    global _RUNTIME_FAMILY_ROOT, _RUNTIME_ABI_PROFILE
     resolved = build_bin.resolve()
     with _RUNTIME_FAMILY_LOCK:
         if _RUNTIME_FAMILY_ROOT is None:
@@ -81,6 +82,10 @@ def _claim_runtime_family(build_bin: Path) -> Path:
                 "native runtime family conflict: this process is already bound "
                 f"to {_RUNTIME_FAMILY_ROOT} and cannot load {resolved}"
             )
+        if abi_profile is not None:
+            if _RUNTIME_ABI_PROFILE is not None and _RUNTIME_ABI_PROFILE != abi_profile:
+                raise RuntimeError("native runtime ABI profile conflict in this process")
+            _RUNTIME_ABI_PROFILE = abi_profile
     return resolved
 
 
@@ -186,6 +191,57 @@ class LlamaContextParams(Structure):
     ]
 
 
+class LlamaContextParamsMainline(Structure):
+    _fields_ = [
+        ("n_ctx", c_uint32),
+        ("n_batch", c_uint32),
+        ("n_ubatch", c_uint32),
+        ("n_seq_max", c_uint32),
+        ("n_rs_seq", c_uint32),
+        ("n_outputs_max", c_uint32),
+        ("n_outputs_max_per_seq", c_uint32),
+        ("n_threads", c_int32),
+        ("n_threads_batch", c_int32),
+        ("ctx_type", c_int),
+        ("rope_scaling_type", c_int),
+        ("pooling_type", c_int),
+        ("attention_type", c_int),
+        ("flash_attn_type", c_int),
+        ("rope_freq_base", c_float),
+        ("rope_freq_scale", c_float),
+        ("yarn_ext_factor", c_float),
+        ("yarn_attn_factor", c_float),
+        ("yarn_beta_fast", c_float),
+        ("yarn_beta_slow", c_float),
+        ("yarn_orig_ctx", c_uint32),
+        ("cb_eval", c_void_p),
+        ("cb_eval_user_data", c_void_p),
+        ("type_k", c_int),
+        ("type_v", c_int),
+        ("moe_cache_size", c_size_t),
+        ("moe_cache_cpu_share", c_float),
+        ("abort_callback", GgmlAbortCallback),
+        ("abort_callback_data", c_void_p),
+        ("embeddings", c_bool),
+        ("offload_kqv", c_bool),
+        ("no_perf", c_bool),
+        ("op_offload", c_bool),
+        ("swa_full", c_bool),
+        ("kv_unified", c_bool),
+        ("samplers", c_void_p),
+        ("n_samplers", c_size_t),
+        ("ctx_other", c_void_p),
+    ]
+
+
+def context_params_type(abi_profile: str):
+    if abi_profile == "legacy":
+        return LlamaContextParams
+    if abi_profile == "mainline-b12611":
+        return LlamaContextParamsMainline
+    raise RuntimeError(f"unsupported native context ABI profile: {abi_profile}")
+
+
 class LlamaSamplerChainParams(Structure):
     _fields_ = [("no_perf", c_bool)]
 
@@ -198,9 +254,23 @@ class LlamaChatMessage(Structure):
 
 
 class LlamaLibrary:
-    def __init__(self, build_bin: Path) -> None:
+    def __init__(self, build_bin: Path, *, abi_profile: str = "legacy") -> None:
+        self.context_params_type = context_params_type(abi_profile)
+        identity_path = build_bin / (runtime_library_filename("orbit-mtmd-bridge") + ".identity.json")
+        if identity_path.is_file():
+            try:
+                commit = json.loads(identity_path.read_text())["build"]["upstream_commit"]
+            except (OSError, KeyError, TypeError, ValueError) as error:
+                raise RuntimeError("invalid native ABI family identity") from error
+            mainline = commit == "690b87d88151dbd775bb6eff5581663688785928"
+            if mainline != (abi_profile == "mainline-b12611"):
+                raise RuntimeError("native artifact and selected ABI profile disagree")
+        elif abi_profile != "legacy":
+            raise RuntimeError("missing isolated native ABI bridge identity")
         required = _require_runtime_prefix(build_bin.resolve(), runtime_library_filename("llama"))
-        self.build_bin = _claim_runtime_family(build_bin)
+        self.build_bin = _claim_runtime_family(build_bin, abi_profile=abi_profile)
+        self.abi_bridge = (MtmdLibrary(build_bin, abi_profile=abi_profile)
+                           if abi_profile != "legacy" else None)
         self._handles: list[CDLL] = []
         self.cpu_lib = self._load_library(runtime_library_filename("ggml-cpu"))
         self.lib = self._load_library(runtime_library_filename("llama"), required=required)
@@ -229,7 +299,7 @@ class LlamaLibrary:
         lib.llama_model_default_params.argtypes = []
         lib.llama_model_default_params.restype = LlamaModelParams
         lib.llama_context_default_params.argtypes = []
-        lib.llama_context_default_params.restype = LlamaContextParams
+        lib.llama_context_default_params.restype = self.context_params_type
         lib.llama_sampler_chain_default_params.argtypes = []
         lib.llama_sampler_chain_default_params.restype = LlamaSamplerChainParams
 
@@ -237,7 +307,7 @@ class LlamaLibrary:
         lib.llama_model_load_from_file.restype = c_void_p
         lib.llama_model_free.argtypes = [c_void_p]
         lib.llama_model_free.restype = None
-        lib.llama_init_from_model.argtypes = [c_void_p, LlamaContextParams]
+        lib.llama_init_from_model.argtypes = [c_void_p, self.context_params_type]
         lib.llama_init_from_model.restype = c_void_p
         lib.llama_free.argtypes = [c_void_p]
         lib.llama_free.restype = None
@@ -412,8 +482,21 @@ class LlamaLibrary:
 class ChatBridgeLibrary:
     def __init__(self, build_bin: Path, bridge_path: Path) -> None:
         self.build_identity = validate_chat_bridge_artifact(build_bin, bridge_path)
+        commit = self.build_identity.get("upstream_commit")
+        if commit == "690b87d88151dbd775bb6eff5581663688785928":
+            abi_profile = "mainline-b12611"
+        elif commit == "41abbfd599fbdd3470fcae0a1fb6530ad8403cd7":
+            abi_profile = "legacy"
+        else:
+            # A developer backend may use an already verified/selected core
+            # ABI, but a chat-only entry cannot guess an unknown layout.
+            with _RUNTIME_FAMILY_LOCK:
+                abi_profile = (_RUNTIME_ABI_PROFILE
+                               if _RUNTIME_FAMILY_ROOT == build_bin.resolve() else None)
+            if abi_profile is None:
+                raise RuntimeError("native chat bridge has no selected core ABI profile")
         required = _require_runtime_prefix(build_bin.resolve(), runtime_library_filename("llama-common"))
-        build_bin = _claim_runtime_family(build_bin)
+        build_bin = _claim_runtime_family(build_bin, abi_profile=abi_profile)
         flags = native_cdll_flags()
         self._handles: list[CDLL] = []
         for path in required:
@@ -532,9 +615,14 @@ class ChatBridgeLibrary:
 
 
 class MtmdLibrary:
-    def __init__(self, build_bin: Path, bridge_path: Path | None = None) -> None:
+    def __init__(self, build_bin: Path, bridge_path: Path | None = None, *, abi_profile: str = "legacy") -> None:
+        context_params_type(abi_profile)
+        self.abi_profile = abi_profile
         resolved_bridge = bridge_path or build_bin / runtime_library_filename("orbit-mtmd-bridge")
         self.build_identity = validate_mtmd_bridge_artifact(build_bin, resolved_bridge)
+        if ((self.build_identity.get("upstream_commit") == "690b87d88151dbd775bb6eff5581663688785928")
+                != (abi_profile == "mainline-b12611")):
+            raise RuntimeError("native artifact and selected ABI profile disagree")
         # `libmtmd` links against llama and ggml, so loading this bridge pulls a
         # whole runtime family in behind it. Claim the family before anything is
         # loaded, exactly as the llama and chat-bridge entry points do: the
@@ -549,7 +637,7 @@ class MtmdLibrary:
         required = _require_runtime_prefix(
             build_bin.resolve(), runtime_library_filename("llama-common")
         )
-        self.build_bin = _claim_runtime_family(build_bin)
+        self.build_bin = _claim_runtime_family(build_bin, abi_profile=abi_profile)
         flags = native_cdll_flags()
         self._handles: list[CDLL] = []
         for path in required:
@@ -586,7 +674,7 @@ class MtmdLibrary:
         ):
             if self.manifest.get(manifest_key) != self.build_identity.get(identity_key):
                 raise RuntimeError("Orbit mtmd bridge provenance mismatch")
-        verify_core_abi_layouts(self.manifest)
+        verify_core_abi_layouts(self.manifest, abi_profile=self.abi_profile)
 
     def _configure_api(self) -> None:
         lib = self.lib
@@ -672,7 +760,8 @@ class MtmdLibrary:
         return value.decode("utf-8", errors="replace") or None
 
 
-def verify_core_abi_layouts(manifest: object) -> None:
+def verify_core_abi_layouts(manifest: object, *, abi_profile: str = "legacy") -> None:
+    context_type = context_params_type(abi_profile)
     if not isinstance(manifest, dict):
         raise RuntimeError("invalid Orbit mtmd bridge ABI manifest")
     structures = {
@@ -689,13 +778,13 @@ def verify_core_abi_layouts(manifest: object) -> None:
             ),
         ),
         "llama_context_params": (
-            LlamaContextParams,
+            context_type,
             (
                 "n_ctx",
                 "n_outputs_max",
                 "n_threads",
                 "flash_attn_type",
-                "defrag_thold",
+                *(('defrag_thold',) if abi_profile == "legacy" else ('moe_cache_size', 'moe_cache_cpu_share')),
                 "cb_eval",
                 "type_k",
                 "abort_callback",

@@ -85,6 +85,21 @@
         "file": "Qwen3.8-Flash-Next-UD-IQ1_M-00001-of-00003.gguf",
         "cache_glob": "models--unsloth--Qwen3.8-Flash-Next-GGUF/snapshots/*/Qwen3.8-Flash-Next-UD-IQ1_M-00001-of-00003.gguf"
       }
+    },
+    {
+      "id": "inkling2-mini-ud-q4-k-m",
+      "display_name": "Inkling 2 Mini UD-Q4_K_M",
+      "profile_id": "orbit-inkling2-mini-native-v1",
+      "backend": "native-llama",
+      "architecture": "inkling2_loop",
+      "native_family": "mainline-support",
+      "target": {
+        "repo": "unsloth/Inkling-2-Mini-GGUF",
+        "file": "Inkling-2-Mini-UD-Q4_K_M.gguf",
+        "remote_file": "Mainline_Support/Inkling-2-Mini-UD-Q4_K_M.gguf_file",
+        "revision": "800c946d7b9c830c86290df49afbbe91db8455f5",
+        "cache_glob": "models--unsloth--Inkling-2-Mini-GGUF/snapshots/800c946d7b9c830c86290df49afbbe91db8455f5/Mainline_Support/Inkling-2-Mini-UD-Q4_K_M.gguf_file"
+      }
     }
   ]
 }

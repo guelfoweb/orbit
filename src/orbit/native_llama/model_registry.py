@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path, PurePosixPath
 import glob
 import json
 import os
+import re
 from typing import Any, Mapping
 
 from orbit.native_llama.gguf_split import split_problems
 from orbit.native_llama.model_profiles import verified_native_model_identity
+from orbit.native_llama.native_families import native_family
 
 
 REGISTRY_RESOURCE = "model_registry.json"
@@ -20,6 +22,8 @@ class ModelFileSpec:
     repo: str
     file: str
     cache_glob: str
+    remote_file: str | None = field(default=None, kw_only=True)
+    revision: str = field(default="main", kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -39,6 +43,7 @@ class ModelManifest:
     target: ModelFileSpec
     mmproj: ModelFileSpec | None
     mtp: MtpSpec | None
+    native_family: str = "legacy"
 
 
 @dataclass(frozen=True)
@@ -175,6 +180,8 @@ def _file_spec(data: dict[str, Any]) -> ModelFileSpec:
         repo=str(data["repo"]),
         file=str(data["file"]),
         cache_glob=str(data["cache_glob"]),
+        remote_file=data.get("remote_file"),
+        revision=data.get("revision", "main"),
     )
 
 
@@ -201,6 +208,7 @@ def _manifest(data: dict[str, Any]) -> ModelManifest:
         target=_file_spec(data["target"]),
         mmproj=_file_spec(mmproj_data) if isinstance(mmproj_data, dict) else None,
         mtp=_mtp_spec(mtp_data) if isinstance(mtp_data, dict) else None,
+        native_family=data.get("native_family", "legacy"),
     )
 
 
@@ -248,7 +256,7 @@ def _validate_registry(data: Any) -> list[dict[str, Any]]:
         _require_keys(
             model,
             required={"id", "display_name", "profile_id", "backend", "architecture", "target"},
-            optional={"mmproj", "mtp"},
+            optional={"mmproj", "mtp", "native_family"},
             label=label,
         )
         model_id = _require_string(model, "id", label)
@@ -256,11 +264,15 @@ def _validate_registry(data: Any) -> list[dict[str, Any]]:
         profile_id = _require_string(model, "profile_id", label)
         backend = _require_string(model, "backend", label)
         architecture = _require_string(model, "architecture", label)
+        native_family(_require_string(model, "native_family", label)
+                      if "native_family" in model else "legacy")
         if backend != "native-llama":
             raise ValueError(f"{label}.backend must be native-llama")
         identity = verified_native_model_identity(profile_id)
         if identity is None or identity.architecture != architecture:
             raise ValueError(f"{label} has an invalid profile/architecture mapping")
+        if model.get("native_family", "legacy") != identity.native_family:
+            raise ValueError(f"{label} has an invalid profile/native family mapping")
         _add_unique(ids, model_id, "model id")
         _add_unique(names, display_name, "model display name")
         _add_unique(profiles, profile_id, "model profile")
@@ -283,7 +295,7 @@ def _validate_registry(data: Any) -> list[dict[str, Any]]:
 
 def _validate_file_spec(value: Any, label: str) -> dict[str, Any]:
     spec = _require_mapping(value, label)
-    _require_keys(spec, required={"repo", "file", "cache_glob"}, optional=set(), label=label)
+    _require_keys(spec, required={"repo", "file", "cache_glob"}, optional={"remote_file", "revision"}, label=label)
     repo = _require_string(spec, "repo", label)
     file_name = _require_string(spec, "file", label)
     cache_glob = _require_string(spec, "cache_glob", label)
@@ -291,6 +303,11 @@ def _validate_file_spec(value: Any, label: str) -> dict[str, Any]:
     if len(repo_parts) != 2 or any(part in {"", ".", ".."} for part in repo_parts):
         raise ValueError(f"{label}.repo must be owner/repository")
     _validate_relative_path(file_name, f"{label}.file", allow_wildcard=False)
+    if "remote_file" in spec:
+        _validate_relative_path(_require_string(spec, "remote_file", label), f"{label}.remote_file", allow_wildcard=False)
+    if "revision" in spec and not re.fullmatch(r"[0-9a-f]{40}", _require_string(spec, "revision", label)):
+        raise ValueError(f"{label}.revision must pin a full commit hash")
+
     _validate_relative_path(cache_glob, f"{label}.cache_glob", allow_wildcard=True)
     return spec
 

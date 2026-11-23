@@ -1,7 +1,7 @@
 """An intentionally aborted route stream is an attempt, not a failure.
 
-The route phase stops its own stream as soon as the output cannot become a
-tool decision. That early stop travels out of the backend as an exception, so
+The route phase retains bounded prose through terminal completion and still
+stops empty/control-channel streams early. That early stop travels out of the backend as an exception, so
 it used to be counted as a failed backend call and every ordinary
 conversational turn reported a failure that never happened. These tests pin
 the distinction end to end, through the real backend and runtime, with only
@@ -115,11 +115,12 @@ class RouteAbortTelemetryTest(unittest.TestCase):
             _serialize_for_profile=lambda self, messages: list(messages),
         )
 
-    def test_prose_route_abort_counts_an_attempt_not_a_failure(self) -> None:
+    def test_whitespace_route_abort_counts_an_attempt_not_a_failure(self) -> None:
         backend, usage = self._backend()
         phases: list[tuple[str, int, str | None]] = []
         patch, calls = self._patched(
-            [lambda: _ScriptedStream(PROSE_CHUNKS, prompt_tokens=40, completion_tokens=8)]
+            [lambda: _ScriptedStream([" "] * 8, prompt_tokens=40, completion_tokens=8),
+             lambda: _ScriptedStream(PROSE_CHUNKS, prompt_tokens=40, completion_tokens=8)]
         )
         with self._stub_profile(), patch:
             result = self._run(backend, phases)
@@ -149,6 +150,21 @@ class RouteAbortTelemetryTest(unittest.TestCase):
         session_line = format_session_token_usage(snapshot)
         self.assertNotIn("failed attempts", session_line)
         self.assertIn("partial", session_line)
+
+    def test_completed_prose_reports_one_call_and_complete_usage(self) -> None:
+        backend, usage = self._backend()
+        phases = []
+        patch, calls = self._patched(
+            [lambda: _ScriptedStream(PROSE_CHUNKS, prompt_tokens=40, completion_tokens=8)])
+        with self._stub_profile(), patch:
+            result = self._run(backend, phases)
+        self.assertEqual(result.content, "I'm doing well, thanks!")
+        self.assertEqual([(p, r) for p, _a, r in phases], [("route", "tool_decision")])
+        snapshot = usage.snapshot()
+        self.assertEqual(snapshot.model_calls, 1)
+        self.assertEqual(snapshot.failed_calls, 0)
+        self.assertFalse(snapshot.usage_incomplete)
+        self.assertNotIn("partial", format_session_token_usage(snapshot))
 
     def test_genuine_route_decision_is_unaffected(self) -> None:
         backend, usage = self._backend()
