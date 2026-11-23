@@ -2229,6 +2229,12 @@ class RuntimeTests(unittest.TestCase):
                     generation_tokens_per_second=None,
                 )
 
+            def chat_stream(self, messages, *, temperature, max_tokens, on_delta, on_progress, tools=None):
+                result = self.chat(messages, temperature=temperature, max_tokens=max_tokens, tools=tools)
+                on_delta("The answer")
+                on_delta(" is 4.")
+                return result
+
         backend = NativeSeparatedReasoningBackend()
         runtime = ChatRuntime(backend=backend, system_prompt=None, thinking_mode=True)
         emitted: list[str] = []
@@ -2243,7 +2249,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result.content, "The answer is 4.")
         self.assertEqual(backend.calls, 1)
         self.assertEqual(backend.thinking_seen, [True])
-        self.assertEqual(emitted, ["<|channel>thought\nprivate arithmetic<channel|>", "The answer is 4."])
+        self.assertEqual(emitted, ["The answer", " is 4.", "\n", "<|channel>thought\nprivate arithmetic<channel|>"])
         self.assertEqual(runtime.messages[-1], {"role": "assistant", "content": "The answer is 4."})
         self.assertNotIn("private arithmetic", repr(runtime.messages))
 

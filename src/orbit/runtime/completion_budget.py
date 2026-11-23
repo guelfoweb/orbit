@@ -154,3 +154,15 @@ def reasoning_decision_budget(base_budget: int, backend: object) -> int:
     if not callable(capability) or capability() is not True:
         return base_budget
     return base_budget + REQUIRED_REASONING_RESERVE_TOKENS
+
+
+def reasoning_final_budget(base_budget: int, backend: object) -> int:
+    """Preserve the final-answer allowance alongside required reasoning.
+
+    Only native profiles explicitly declaring mandatory separated reasoning
+    receive the same bounded internal reserve as decision phases. The combined
+    ceiling reaches exact context admission before every existing post-tool
+    final/retry/repair call. Visible-answer policy, retry counts, CHAT and
+    ANALYSIS finalization budgets remain unchanged; length is still bounded.
+    """
+    return reasoning_decision_budget(base_budget, backend)
