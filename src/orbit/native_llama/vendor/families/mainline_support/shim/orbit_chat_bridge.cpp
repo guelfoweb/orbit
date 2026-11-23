@@ -111,7 +111,8 @@ static int render_contract(
     bool enable_thinking,
     bool required,
     char * output,
-    size_t output_size
+    size_t output_size,
+    const char * reasoning_effort = nullptr
 ) {
     last_error.clear();
     auto * context = static_cast<orbit_chat_context *>(opaque);
@@ -136,7 +137,21 @@ static int render_contract(
         inputs.tool_choice = required ? COMMON_CHAT_TOOL_CHOICE_REQUIRED : COMMON_CHAT_TOOL_CHOICE_AUTO;
         inputs.parallel_tool_calls = false;
         inputs.reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK;
-        const bool effort_none = orbit_apply_reasoning_control(context->templates.get(), inputs, enable_thinking);
+        bool effort_none = orbit_apply_reasoning_control(context->templates.get(), inputs, enable_thinking);
+        if (reasoning_effort != nullptr) {
+            const auto caps = common_chat_templates_get_caps(context->templates.get());
+            // The generic capability probe lists only its standard test levels,
+            // not every name supported by the model's template (e.g. minimal/max).
+            // Validate our named transport here; the template validates its map.
+            const std::string effort(reasoning_effort);
+            const bool named = effort == "none" || effort == "minimal" || effort == "low" ||
+                               effort == "medium" || effort == "high" || effort == "xhigh" || effort == "max";
+            if (!named || !caps.value("supports_reasoning_effort", false)) {
+                throw std::invalid_argument("unsupported reasoning_effort for this template");
+            }
+            inputs.chat_template_kwargs["reasoning_effort"] = common_json(reasoning_effort).dump();
+            effort_none = std::string(reasoning_effort) == "none";
+        }
 
         const common_chat_params params = common_chat_templates_apply(context->templates.get(), inputs);
         if (params.prompt.str().empty()) {
@@ -177,6 +192,7 @@ static int render_contract(
             result["grammar_lazy"] = params.grammar_lazy;
             result["tool_choice"] = "required";
         }
+        if (reasoning_effort != nullptr) result["reasoning_effort"] = reasoning_effort;
         return copy_result(result.dump(), output, output_size);
     } catch (const std::exception & exc) {
         context->render_ready = false;
@@ -199,6 +215,19 @@ ORBIT_EXPORT int orbit_chat_bridge_render_required(
 ) {
     return render_contract(opaque, messages_json, tools_json, enable_thinking,
                            true, output, output_size);
+}
+
+ORBIT_EXPORT int orbit_chat_bridge_render_effort(
+    void * opaque, const char * messages_json, const char * tools_json,
+    bool enable_thinking, const char * reasoning_effort, bool required,
+    char * output, size_t output_size
+) {
+    if (reasoning_effort == nullptr) {
+        last_error = "missing reasoning_effort";
+        return -1;
+    }
+    return render_contract(opaque, messages_json, tools_json, enable_thinking,
+                           required, output, output_size, reasoning_effort);
 }
 
 // Same generation-prompt prefill as common/sampling.cpp. Catch native errors

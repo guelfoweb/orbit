@@ -189,13 +189,75 @@ No cache profile, snapshot policy, prompt identity, native library or MTP settin
 is changed by this budget fix. Diagnostic evidence is retained under
 `workdir/diag/inkling_final_budget_cache_1/`.
 
+## Named reasoning effort
+
+The verified Inkling Q4 profile accepts named effort on ordinary native CHAT
+and exact token-count requests. The pinned model template maps these inputs:
+
+| Effort | Template value |
+|---|---:|
+| `none` | 0 |
+| `minimal` | 0.1 |
+| `low` | 0.2 |
+| `medium` | 0.7 |
+| `high` | 0.9 |
+| `xhigh` | 0.99 |
+| `max` | 0.99 |
+
+The HTTP API accepts `reasoning_effort` at the top level or in
+`chat_template_kwargs`; conflicting declarations and unknown/non-string values
+are rejected. Only these named values are exposed, not arbitrary numeric input.
+Omitting the field preserves the legacy thinking-derived template behavior.
+Explicit effort overrides that template choice, while the thinking flag remains
+separate. Unsupported/unverified profiles and older bridges reject explicit
+requests rather than silently ignoring the selected effort. Artifact-content
+requests do not accept it; required-tool decoding accepts only None effort.
+Continuation retains already-rendered state and cannot change explicit effort.
+
+A validated ContextVar scope surrounds both native generation and exact token
+counting under the model lock, and resets on success or exceptions. This keeps
+simultaneous HTTP requests isolated and makes context admission count the same
+render the model receives. The optional mainline-only bridge export sets the
+template's declared `reasoning_effort` keyword. Existing exports, context ABI,
+legacy native family, prompts, tool grammars/parsers and retry counts remain
+unchanged. Rebuild `--family mainline-support` to expose the new symbol; capability
+publication requires both the verified profile and the actual upgraded bridge.
+The generic template capability probe need not enumerate every model-specific
+alias; the pinned template's own map remains authoritative.
+
+The local English GUI replaces the checkbox with all seven options on this
+profile, starts at None, and sends the exact named choice through the runtime
+backend, including token counting. Other profiles retain legacy Off/On choices.
+Settings are disabled while saving, stale status polls cannot overwrite an
+acknowledged choice, and a rejected change restores the last confirmed setting.
+None requests minimum reasoning; it cannot guarantee no internal reasoning.
+Budgets are unchanged, including the fixed required-reasoning reserve. A higher
+level is not a hard token quota or a new tool/ANALYSIS semantic qualification.
+The aligned checkpoint remains eligible only for None/legacy thinking off;
+higher named efforts invalidate that checkpoint pending separate qualification.
+
+Evidence: `workdir/diag/reasoning_effort_1/`. Native rendering verified all seven
+values; separate old/new processes retained identical None/High prompt bytes,
+full-vocabulary prefill logits and 24-token generated sequences. Seven real
+GUI/native tools-off smokes completed with stop and the requested value attested
+at the native generation render. On one fixed math prompt, two cold observations
+per level in None/Max/Max/None order both produced 91 completion tokens: mean GUI
+elapsed 19.625 seconds for None and 19.77 for Max. No speed difference is
+established by that small, host-specific sample. It is not a broad reasoning or
+quality benchmark. A second cold comparison used the short OK request from the
+GUI smokes, again in None/Max/Max/None order: None produced 41 completion tokens
+and averaged 14.66 seconds; Max produced 62 and averaged 20.325 seconds. The
+per-token decode rates were similar. Both cases are retained, including the
+case with no observed speed improvement. Native/model identity and benchmark
+metadata are retained.
+
 ## Inkling aligned prefill checkpoint
 
 A later speed follow-up adds one bounded native sequence checkpoint for the
 verified `orbit-inkling2-mini-native-v1` profile. Eligibility is deliberately
 narrow: CPU/text, ctx8192, threads6/6, batch256, ubatch128, progress_step64,
 repack off, low-memory off, thinking off, native CHAT prompt mode (without a
-native tools payload), and all MTP/probe modes off. Other
+native tools payload), None/omitted effort, and all MTP/probe modes off. Other
 profiles retain their existing cache policies. `ORBIT_ALIGNED_PREFIX_REUSE=0`
 is the opt-out; invalid values also disable it.
 

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .base import Message
+from orbit.reasoning import parse_reasoning_effort
 
 
 ARTIFACT_CONTENT_PROTOCOL_ID = "orbit-artifact-content-v1"
@@ -30,6 +31,7 @@ class ChatPayloadOptions:
     final_prefix_experiment: bool = False
     artifact_content: bool = False
     route_history_continuation: bool = False
+    reasoning_effort: str | None = None
 
 
 def build_chat_payload(options: ChatPayloadOptions) -> dict[str, Any]:
@@ -46,6 +48,10 @@ def build_chat_payload(options: ChatPayloadOptions) -> dict[str, Any]:
         "thinking": options.thinking,
         "chat_template_kwargs": {"enable_thinking": options.thinking},
     }
+    effort = parse_reasoning_effort(options.reasoning_effort)
+    if effort is not None:
+        payload["reasoning_effort"] = effort
+        payload["chat_template_kwargs"]["reasoning_effort"] = effort
     if options.stream:
         payload["stream"] = True
     if options.route_prefix_anchor:

@@ -44,6 +44,7 @@ from .multimodal import flatten_message_content, prepare_multimodal_messages
 from .artifact_capabilities import verified_artifact_supports
 from .rendered_prompt import RenderedChatPrompt, prompt_from_render
 from .model_profiles import (
+    INKLING2_PROFILE_ID,
     ORNITH15_PROFILE_ID,
     PROFILE_METADATA_KEYS,
     QWEN36_PROFILE_ID,
@@ -58,6 +59,7 @@ from .model_profiles import (
 from .gguf_split import split_sibling_names
 from .model_discovery import inspect_native_model_profile
 from .research_admission import ResearchAdmission
+from orbit.reasoning import current_reasoning_effort, REASONING_EFFORT_LEVELS, parse_reasoning_effort
 from .aligned_prefix_cache import AlignedPrefixCache, PREFIX_TOKENS as ALIGNED_PREFIX_TOKENS, enabled as aligned_prefix_enabled, qualified_config as aligned_prefix_config
 from .cache_profile_policy import (
     ROLLING_ROUTE_PROFILE_IDS, POST_FINAL_ROUTE_SHADOW_PROFILE_IDS,
@@ -5122,6 +5124,7 @@ class NativeLlamaClient:
         if not cache_policy_for_profile(getattr(profile, "profile_id", None)).aligned_prompt_checkpoint:
             return False
         return (aligned_prefix_enabled() and not thinking and aligned_prefix_config(self.config)
+                and current_reasoning_effort() in (None, "none")
                 and not self._session.mtp_enabled
                 and getattr(self, "_persistent_mtp_runtime", None) is None
                 and self._session.prompt_cache_mode == "chat:thinking=off")
@@ -5129,6 +5132,7 @@ class NativeLlamaClient:
     def _aligned_prefix_identity(self) -> str:
         return hash_text(json.dumps({
             "strategy": "aligned-prefill-1024-v1",
+            "reasoning_effort": current_reasoning_effort() or "none",
             "context": str(self._session.ctx_tgt),
             "model": str(self.paths.model),
             "profile": self.model_profile.profile_id,
@@ -5272,6 +5276,20 @@ class NativeLlamaClient:
             and getattr(profile, "profile_id", None) == QWEN3_CODER_PROFILE_ID
         )
 
+    def supported_reasoning_effort_levels(self) -> tuple[str, ...]:
+        profile = getattr(self, "model_profile", None)
+        bridge = getattr(self, "chat_bridge", None)
+        if (getattr(profile, "verified", False)
+                and getattr(profile, "profile_id", None) == INKLING2_PROFILE_ID
+                and getattr(bridge, "supports_reasoning_effort", False) is True):
+            return REASONING_EFFORT_LEVELS
+        return ()
+
+    def validate_reasoning_effort(self, effort: str | None) -> None:
+        value = parse_reasoning_effort(effort)
+        if value is not None and value not in self.supported_reasoning_effort_levels():
+            raise ValueError("reasoning_effort is unsupported by this model or native bridge build")
+
     def apply_chat_template(
         self,
         messages: list[NativeMessage],
@@ -5287,6 +5305,8 @@ class NativeLlamaClient:
         if not self._model:
             raise RuntimeError("native client not loaded")
         thinking = self._thinking_enabled(thinking)
+        effort = current_reasoning_effort()
+        self.validate_reasoning_effort(effort)
         rendered_messages = [dict(message) for message in messages]
         profile = getattr(self, "model_profile", None)
         if profile is not None and profile.uses_native_chat_bridge:
@@ -5297,6 +5317,7 @@ class NativeLlamaClient:
                 self._serialize_profile_messages(rendered_messages),
                 [dict(tool) for tool in (tools or [])],
                 thinking=thinking,
+                **({"reasoning_effort": effort} if effort is not None else {}),
                 **({"tool_choice": tool_choice} if tool_choice != "auto" else {}),
             )
             prompt = prompt_from_render(rendered)

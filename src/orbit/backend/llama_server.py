@@ -87,6 +87,7 @@ class LlamaServerBackend:
         self.model = model
         self.timeout = timeout
         self.thinking = thinking
+        self.reasoning_effort: str | None = None
         self._model_info_cache: ModelInfo | None = None
         self._display_model_name: str | None = None
         self._server_tools_cache: list[dict[str, Any]] | None = None
@@ -123,6 +124,7 @@ class LlamaServerBackend:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 thinking=self.thinking,
+                reasoning_effort=getattr(self, "reasoning_effort", None),
                 tools=tools,
                 route_prefix_anchor=_route_prefix_anchor_requested(native_backend=native_backend),
                 analysis_rolling_anchor=_analysis_rolling_anchor_requested(native_backend=native_backend),
@@ -171,6 +173,7 @@ class LlamaServerBackend:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 thinking=self.thinking,
+                reasoning_effort=getattr(self, "reasoning_effort", None),
                 tools=tools,
                 tool_choice=tool_choice,
                 stream=True,
@@ -392,6 +395,7 @@ class LlamaServerBackend:
                     "messages": messages,
                     "tools": tools or [],
                     "thinking": thinking,
+                    **({"reasoning_effort": self.reasoning_effort} if getattr(self, "reasoning_effort", None) is not None else {}),
                     **({"tool_choice": tool_choice} if tool_choice != "auto" else {}),
                 },
             )

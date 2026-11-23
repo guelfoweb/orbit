@@ -247,6 +247,46 @@ These dispositions carry forward ORBIT-TODO-PRIORITY-AUDIT-1 and the subsequent
   `docs/MODEL_RESEARCH_QUALIFICATION.md#inkling-aligned-prefill-checkpoint`.
   Evidence: `workdir/diag/inkling_cache_speed_1/`.
 
+### Named Inkling reasoning effort (2026-11-23)
+
+- Native CHAT and exact token counting accept the seven named efforts on the
+  verified Inkling Q4 profile: none/minimal/low/medium/high/xhigh/max. The pinned
+  template maps them to 0/0.1/0.2/0.7/0.9/0.99/0.99. Omitted input preserves
+  legacy behavior; None remains minimum effort, not a full reasoning shutdown.
+  Unsupported profiles/builds and conflicting/invalid declarations fail closed.
+- The optional mainline bridge export passes the declared template keyword;
+  old exports, context ABI and legacy family remain compatible. Rebuild with
+  `python3 scripts/build_native.py --family mainline-support`. Request scopes
+  cover inference and exact counts under the model lock, with exception-safe
+  reset. No message rewriting, prompt tuning, parser/grammar changes, budget
+  increases or extra retry are introduced. Artifact-content has no effort
+  override; required-tool requests accept only None and continuation retains
+  its rendered state. Higher named efforts remain ineligible for the aligned
+  checkpoint; the qualified None cache behavior is retained.
+- Source qualification: **6660 tests / 47 skips / RC=0**, **422 core tests /
+  zero skips**, **340 focused tests**, **26 local GUI tests**. Ten Python
+  mutations and two separately compiled native bridge mutations were applied
+  and caught. Independent review closed at BLOCKER 0 / MAJOR 0 / MINOR 0;
+  final full source hashes remained stable. The initial incomplete /props
+  publication was caught by GUI verification, fixed and covered through real
+  HTTP; the incomplete full run was stopped and not accepted.
+- Seven tools-off real GUI smokes passed with stop and OK, observing the named
+  request and numeric effort in the actual native generation render. Old/new
+  isolated processes retained identical None/High prompts, full-vocabulary
+  prefill logits and 24-token sequences. GUI choices survive refresh; settings
+  saves protect against stale polls and restore a refused selection. The GUI
+  remains a local unpublished project, not staged with the runtime source.
+- Two host-specific cold comparisons in None/Max/Max/None order used the same
+  configuration and prompt within each case. A short OK request produced
+  41 versus 62 tokens, mean 14.66 versus 20.325 seconds. The math case produced
+  91 tokens at both levels, mean 19.625 versus 19.77 seconds: no speed difference
+  was established there. These are four observations per prompt, not broad
+  reasoning/quality or performance qualification. No higher-effort tool-intent
+  or ANALYSIS semantic qualification is claimed; default None is preserved.
+- Contract: `docs/MODEL_RESEARCH_QUALIFICATION.md#named-reasoning-effort`.
+  Evidence: `workdir/diag/reasoning_effort_1/` (native render/parity, GUI,
+  matched speed cases, mutation outputs, source and core/full logs).
+
 ## Historical machine-migration handoff (2026-09-13)
 
 The following migration record is retained as written. Its release, Git state,

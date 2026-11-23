@@ -528,6 +528,9 @@ class ChatBridgeLibrary:
         if hasattr(lib, "orbit_chat_bridge_render_required"):
             lib.orbit_chat_bridge_render_required.argtypes = lib.orbit_chat_bridge_render.argtypes
             lib.orbit_chat_bridge_render_required.restype = c_int
+        if hasattr(lib, "orbit_chat_bridge_render_effort"):
+            lib.orbit_chat_bridge_render_effort.argtypes = [c_void_p, c_char_p, c_char_p, c_bool, c_char_p, c_bool, POINTER(c_char), c_size_t]
+            lib.orbit_chat_bridge_render_effort.restype = c_int
         if hasattr(lib, "orbit_chat_bridge_required_sampler"):
             lib.orbit_chat_bridge_required_sampler.argtypes = [c_void_p, c_char_p, c_char_p]
             lib.orbit_chat_bridge_required_sampler.restype = c_void_p
@@ -558,11 +561,20 @@ class ChatBridgeLibrary:
         *,
         thinking: bool,
         tool_choice: str = "auto",
+        reasoning_effort: str | None = None,
     ) -> dict[str, object]:
         messages_json = json.dumps(messages, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         tools_json = json.dumps(tools, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if tool_choice not in ("auto", "required"):
             raise ValueError("unsupported tool_choice")
+        if reasoning_effort is not None:
+            from orbit.reasoning import parse_reasoning_effort
+            effort = parse_reasoning_effort(reasoning_effort)
+            render_effort = getattr(self.lib, "orbit_chat_bridge_render_effort", None)
+            if render_effort is None:
+                raise RuntimeError("Orbit chat bridge needs rebuilding for reasoning effort")
+            return self._json_call(render_effort, context, messages_json, tools_json,
+                                   thinking, effort.encode("utf-8"), tool_choice == "required")
         render = self.lib.orbit_chat_bridge_render
         if tool_choice == "required":
             render = getattr(self.lib, "orbit_chat_bridge_render_required", None)
@@ -575,6 +587,10 @@ class ChatBridgeLibrary:
             tools_json,
             thinking,
         )
+
+    @property
+    def supports_reasoning_effort(self) -> bool:
+        return hasattr(self.lib, "orbit_chat_bridge_render_effort")
 
     def required_sampler(self, vocab, grammar: str, generation_prompt: str):
         factory = getattr(self.lib, "orbit_chat_bridge_required_sampler", None)
