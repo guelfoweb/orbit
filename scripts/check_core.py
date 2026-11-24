@@ -23,6 +23,7 @@ MODULES = (
     "tests.test_model_probe",
     "tests.test_cache_profile_policy",
     "tests.test_aligned_prefix_cache",
+    "tests.test_gpu_prefix_cache",
     "tests.test_reasoning_effort",
     "tests.test_core_checks",
     "tests.test_reasoning_decision_budget",

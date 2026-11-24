@@ -3868,6 +3868,7 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
     CREATE_UNARY_OP(xielu, XIELU)
     CREATE_UNARY_OP(neg, NEG)
     CREATE_UNARY_OP(tanh, TANH)
+    ggml_vk_create_pipeline(device, device->pipeline_softcap, "softcap_f32", softcap_f32_len, softcap_f32_data, "main", 2, sizeof(vk_op_unary_push_constants), {512, 1, 1}, {}, 1);
     CREATE_UNARY_OP(sigmoid, SIGMOID)
     CREATE_UNARY_OP(hardsigmoid, HARDSIGMOID)
     CREATE_UNARY_OP(hardswish, HARDSWISH)
@@ -13578,7 +13579,16 @@ bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgraph, in
 
         break;
     case GGML_OP_SCALE:
-        if (ctx->fused_hc_post_gate) {
+        if (ctx->fused_softcap) {
+            auto dst = cgraph->nodes[node_idx + 2];
+            auto pc = vk_op_unary_push_constants_init(src0, dst);
+            pc.param1 = ggml_get_op_params_f32(node, 0);
+            pc.param2 = ggml_get_op_params_f32(dst, 0);
+            pc.param3 = ggml_get_op_params_f32(node, 1);
+            pc.param4 = ggml_get_op_params_f32(dst, 1);
+            ggml_vk_op_f32(ctx, compute_ctx, src0, nullptr, nullptr, nullptr, dst, GGML_OP_UNARY,
+                           std::move(pc), ctx->device->pipeline_softcap);
+        } else if (ctx->fused_hc_post_gate) {
             ggml_tensor * hc_post = cgraph->nodes[node_idx + ctx->num_additional_fused_ops];
             ggml_vk_dsv4_hc_post(ctx, compute_ctx, hc_post->src[0], hc_post->src[1], hc_post->src[2], hc_post->src[3], hc_post, node);
         } else {
@@ -14727,6 +14737,27 @@ static bool ggml_vk_can_fuse_hc_post_gate(const struct ggml_cgraph * cgraph, int
            ggml_are_same_shape(scale_in->src[0], scale_out);
 }
 
+static bool ggml_vk_can_fuse_softcap(const ggml_backend_vk_context * ctx, const ggml_cgraph * graph, int i) {
+    if (!ggml_can_fuse(graph, i, {GGML_OP_SCALE, GGML_OP_UNARY, GGML_OP_SCALE})) {
+        return false;
+    }
+    const auto a = graph->nodes[i];
+    const auto b = graph->nodes[i + 1];
+    const auto c = graph->nodes[i + 2];
+    if (ggml_get_unary_op(b) != GGML_UNARY_OP_TANH || b->src[0] != a || c->src[0] != b ||
+        ggml_get_op_params_f32(a, 1) != 0.0f || ggml_get_op_params_f32(c, 1) != 0.0f ||
+        !std::isfinite(ggml_get_op_params_f32(a, 0)) || !std::isfinite(ggml_get_op_params_f32(c, 0))) {
+        return false;
+    }
+    for (auto tensor : {a->src[0], a, b, c}) {
+        if (tensor->type != GGML_TYPE_F32 || !ggml_is_contiguous(tensor) ||
+            !ggml_are_same_shape(a->src[0], tensor) || get_misalign_bytes(ctx, tensor) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool ggml_vk_can_fuse(const ggml_backend_vk_context * ctx, const struct ggml_cgraph * cgraph, int node_idx, std::initializer_list<enum ggml_op> ops) {
     if (ops.size() == 2 && ops.begin()[0] == GGML_OP_UNARY && ops.begin()[1] == GGML_OP_MUL) {
         return ggml_vk_can_fuse_unary_mul_pair(cgraph, node_idx);
@@ -15593,6 +15624,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
         ctx->fused_topk_moe_scale = false;
         ctx->fused_topk_qsa = false;
         ctx->fused_hc_post_gate = false;
+        ctx->fused_softcap = false;
         ctx->fused_rms_norm_mode = RMS_NORM_COUNT;
         const char *fusion_string {};
         if (!ctx->device->disable_fusion) {
@@ -15649,6 +15681,11 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
                 op_srcs_fused_elementwise[0] = false;
                 op_srcs_fused_elementwise[1] = true;
                 op_srcs_fused_elementwise[2] = true;
+            } else if (ggml_vk_can_fuse_softcap(ctx, cgraph, i)) {
+                ctx->num_additional_fused_ops = 2;
+                ctx->fused_softcap = true;
+                fusion_string = "SCALE_TANH_SCALE";
+                std::fill_n(op_srcs_fused_elementwise, 3, true);
             } else if (ggml_can_fuse_subgraph(cgraph, i, hc_post_gate_pattern, { i + 3 }) &&
                        ggml_check_edges(cgraph, i, hc_post_gate_edges) &&
                        ggml_vk_can_fuse_hc_post_gate(cgraph, i)) {
@@ -15835,6 +15872,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
                 ctx->fused_topk_moe_scale = false;
                 ctx->fused_topk_qsa = false;
                 ctx->fused_hc_post_gate = false;
+                ctx->fused_softcap = false;
                 ctx->fused_rms_norm_mode = RMS_NORM_COUNT;
                 fusion_string = nullptr;
             }

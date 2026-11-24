@@ -346,6 +346,7 @@ class NativeLlamaClient:
         if getattr(paths, "accelerator", "cpu") not in ("cpu", "intel-gpu"):
             raise ValueError("unknown acceleration selection")
         gpu_requested = getattr(paths, "accelerator", "cpu") == "intel-gpu"
+        self._gpu_prefix_backend_identity = None
         if gpu_requested and self.config.gpu_layers != -1:
             raise ValueError("Intel GPU requires full GPU layer offload")
         self._acceleration_status = {"requested": getattr(paths, "accelerator", "cpu"), "active": "cpu" if not self.config.gpu_layers else None, "device": "CPU" if not self.config.gpu_layers else None, "offloaded_layers": 0 if not self.config.gpu_layers else None}
@@ -361,6 +362,8 @@ class NativeLlamaClient:
             bridge_identity = validate_chat_bridge_artifact(paths.build_bin, _resolve_chat_bridge_path(paths))
             if gpu_requested and "libggml-vulkan.so" not in bridge_identity.get("libraries", {}):
                 raise RuntimeError("Intel GPU requires its identity-verified Vulkan library")
+            if gpu_requested:
+                self._gpu_prefix_backend_identity = bridge_identity["libraries"]["libggml-vulkan.so"]
         abi_options = ({"abi_profile": paths.abi_profile}
                        if getattr(paths, "abi_profile", "legacy") != "legacy" else {})
         self.lib = LlamaLibrary(paths.build_bin, **abi_options)
@@ -5148,14 +5151,23 @@ class NativeLlamaClient:
             return False
         if not cache_policy_for_profile(getattr(profile, "profile_id", None)).aligned_prompt_checkpoint:
             return False
-        return (aligned_prefix_enabled() and not thinking and aligned_prefix_config(self.config)
+        from .aligned_prefix_cache import gpu_config, gpu_enabled
+        gpu = getattr(getattr(self, "paths", None), "accelerator", "cpu") == "intel-gpu"
+        status = getattr(self, "_acceleration_status", {})
+        layout = (gpu_enabled() and gpu_config(self.config)
+                  and getattr(self.paths, "abi_profile", None) == "mainline-b12611"
+                  and bool(getattr(self, "_gpu_prefix_backend_identity", None))
+                  and status.get("active") == "intel-gpu"
+                  and status.get("gpu_weight_bytes", 0) > 0) if gpu else (
+                      aligned_prefix_enabled() and aligned_prefix_config(self.config))
+        return (layout and not thinking
                 and current_reasoning_effort() in (None, "none")
                 and not self._session.mtp_enabled
                 and getattr(self, "_persistent_mtp_runtime", None) is None
                 and self._session.prompt_cache_mode == "chat:thinking=off")
 
     def _aligned_prefix_identity(self) -> str:
-        return hash_text(json.dumps({
+        identity = {
             "strategy": "aligned-prefill-1024-v1",
             "reasoning_effort": current_reasoning_effort() or "none",
             "context": str(self._session.ctx_tgt),
@@ -5167,7 +5179,12 @@ class NativeLlamaClient:
             "config": repr(self.config),
             "session": self._session.session_id,
             "reset": self._reset_generation,
-        }, sort_keys=True))
+        }
+        if getattr(self.paths, "accelerator", "cpu") == "intel-gpu":
+            identity.update(strategy="aligned-prefill-1024-gpu-v1",
+                            vulkan=self._gpu_prefix_backend_identity,
+                            device=self._acceleration_status)
+        return hash_text(json.dumps(identity, sort_keys=True))
 
     def _prepare_memory_with_aligned_prefix(self, prompt_tokens: list[int], identity: str) -> int:
         cache = self._aligned_prefix_store()

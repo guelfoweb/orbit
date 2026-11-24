@@ -313,6 +313,27 @@ These dispositions carry forward ORBIT-TODO-PRIORITY-AUDIT-1 and the subsequent
   `workdir/diag/intel_vulkan_integration_1/`. No IQ3 24-intent gate is resumed or
   capability approval implied; the operator's manual-testing disposition remains.
 
+### Intel GPU kernel, fusion and reuse follow-up (2026-11-24)
+
+- The separate Vulkan overlay adds read-only IQ3 vector-table lookup, packed
+  NVFP4 vector reads/direct scale conversion, and guarded F32 contiguous
+  SCALE/TANH/SCALE fusion. Ordinary TANH and non-vector quantization paths are
+  unchanged; signed-zero scale biases and NVFP4 zero codes are preserved.
+- GPU aligned-prefill reuse is a **separate opt-in**, default OFF:
+  `ORBIT_GPU_ALIGNED_PREFIX_REUSE=1`. It retains the common master kill switch,
+  bounded snapshot/failure lifecycle and exact 1024-token prefix, with exact
+  GPU 1/1 configuration and a distinct identity including the bound Vulkan
+  library and active device. CPU cache policy/identity and profile admission
+  remain unchanged. CPU Q4 checkpoint membership does not qualify Q4 GPU reuse.
+- The local untracked GUI reuses the same live owned model/device selection for
+  a new chat, preserving resident model weights and compiled pipelines. Actual
+  model/device, positive GPU buffers, process liveness and listener ownership
+  are checked; a device/model change still restarts only its owned server.
+- Evidence and rejected runs: `workdir/diag/intel_gpu_tuning_2/`. Preserve the
+  operator's private manually approved IQ3 overlay. No public IQ3 admission,
+  Q4 inference, MTP or resumed 24-intent gate is implied. Native numerical and
+  cache parity observations do not establish new tool/ANALYSIS qualification.
+
 ## Historical machine-migration handoff (2026-09-13)
 
 The following migration record is retained as written. Its release, Git state,

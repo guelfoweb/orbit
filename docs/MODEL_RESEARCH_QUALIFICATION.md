@@ -286,6 +286,33 @@ length, shared-prefix length, output length and host load. First requests and
 short prompts retain their cold cost; model reasoning and decode speed are
 unchanged. This does not extend model or ANALYSIS semantic qualification.
 
+## Experimental Intel GPU checkpoint
+
+The Intel Vulkan backend has a separate opt-in checkpoint path. It is **off by
+default**: set `ORBIT_GPU_ALIGNED_PREFIX_REUSE=1` only for a locally validated
+GPU profile. `ORBIT_ALIGNED_PREFIX_REUSE=0` remains the master kill switch;
+invalid values of either variable disable GPU reuse. CPU eligibility and CPU
+checkpoint identity are unchanged. CPU profile membership alone does not
+qualify GPU reuse; no Q4 GPU observation or new model admission is implied.
+
+The GPU layout is exact: mainline ABI, ctx8192, threads1/1, batch256, ubatch128,
+progress_step64, repack off, full GPU offload, low-memory off, None/omitted effort,
+thinking off, native CHAT prompt mode without a native tools payload, and all
+MTP/probe modes off. A verified profile with checkpoint membership, a loaded
+Intel GPU with positive weight-buffer bytes and an identity-verified Vulkan
+library are required. Its separate cache key binds the Vulkan library hash,
+active device state and the existing complete context/model/template/native/
+configuration/session/reset identity.
+
+Capture at token1024, exact-prefix checks, the 256 MiB bound, one resident
+snapshot, suffix evaluation, cancellation/reset/error invalidation and
+clear-before-restore/clear-after-failure fallback use the existing bounded
+checkpoint mechanism. No inference state is persisted to disk. The retained
+IQ3 observation belongs to the operator's private manually approved runtime;
+it does not enable IQ3 in the published registry or resume its stopped
+24-intent gate. Native comparisons and local GUI evidence are retained under
+`workdir/diag/intel_gpu_tuning_2/`.
+
 ## GUI conversation turn ownership
 
 `ChatRuntime` accepts an optional keyword-only `user_turn_namespace` containing
