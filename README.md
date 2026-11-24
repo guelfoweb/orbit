@@ -270,7 +270,18 @@ The local GUI offers **CPU (default)** and **Intel GPU (experimental)** beside
 each available model. Changing the device restarts the GUI-owned server and
 starts a new chat, preserving the old saved conversation. A failed startup
 attempt restores the previous owned selection when possible. Externally
-started servers remain under their operator's control.
+started servers remain under their operator's control. Selecting the already
+loaded model on the same device offers **New chat** and keeps its weights and
+compiled kernels resident; a changed model/device still requires loading.
+
+A separate GPU prefill checkpoint is available only by explicit opt-in with
+`ORBIT_GPU_ALIGNED_PREFIX_REUSE=1`; it is off by default. The common
+`ORBIT_ALIGNED_PREFIX_REUSE=0` switch also disables GPU reuse. Exact layout is
+ctx8192, threads1/1, batch256, ubatch128, None effort, thinking off, full offload
+and MTP off. It can reuse an exact 1024-token prefix in the same bound context,
+using one checkpoint capped at 256 MiB. First/short requests remain cold.
+The retained GPU observation is for the private, manually approved IQ3 runtime,
+not a qualification of Q4 GPU reuse. See the [GPU checkpoint contract](docs/MODEL_RESEARCH_QUALIFICATION.md#experimental-intel-gpu-checkpoint).
 
 The Vulkan source is a hash-bound overlay on the mainline source, with its own
 build directory, libraries, source and patchset identities. CPU sources and

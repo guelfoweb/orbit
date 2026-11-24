@@ -2,14 +2,44 @@
   "base_source_tree_sha256": "10942fabccef1059a35a929c2636756c245a8ddbd086a4979f3103a8c516c123",
   "files": [
     {
+      "path": "ggml/src/ggml-vulkan/ggml-vulkan-types.h",
+      "base_sha256": "8a301579421260fdaeccbf72cad623e53ea9623a1e5dedfd9363f0f9d501bbc8",
+      "overlay_sha256": "4132aabe65340d017cb1a3bce9eba39ddb0220d62275923d512f6052f97128a7"
+    },
+    {
       "path": "ggml/src/ggml-vulkan/ggml-vulkan.cpp",
       "base_sha256": "6028145a333b821846e38773fa8a2a826b8d0f9586f4423b2e9af3e9b3cd16e0",
-      "overlay_sha256": "c0459894ea1ecbc527c8700dbd94755dab8fa056db8e8a01edc90011d91de3e8"
+      "overlay_sha256": "7f03acee79d453be5cf44cc03ebb192a49cd776e623420b5f08f56c5aa8340d1"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_funcs.glsl",
+      "base_sha256": "3b7a5edf6072ee8e44b4a9ddeb89b099d1fb64901d9be419c8ed9701d2f1d68b",
+      "overlay_sha256": "c146a2937ae6d881836a52b8b1abee3541138f0aa3035657c30ce96f7457dbe6"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec.comp",
+      "base_sha256": "15e43c0c2a1cc64dde9cf4a8180a43aaf5aa85c5aa7a069154aa569eed7d93b8",
+      "overlay_sha256": "f898530abb3f45fa85a7c97c94df4c9a9d9837d445389b70b58b5177e1f42212"
     },
     {
       "path": "ggml/src/ggml-vulkan/vulkan-shaders/scale.comp",
       "base_sha256": "6a5f6d54b1cc0e4218c999442265b1c6c84d717933feae98a7f9cf2cf14038ba",
       "overlay_sha256": "cca34fc9d7d2bb076fd9c8c6caa30de5035042f97d130fe2089a82ab14c6bf0c"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/types.glsl",
+      "base_sha256": "c740d27faf08f9171d6e5dd6f65bf1a711bc145d0ccabbe978f47e6c01e4cb98",
+      "overlay_sha256": "6c92ddb82f1640476366331554747086b9785d94f9a50744356bd33997d0847e"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/unary.comp",
+      "base_sha256": "8f31b1f585380a48a11ea3eeba55a935dfbdb4398660b4600e60fec3d151a9df",
+      "overlay_sha256": "8d447d13a8f4d4e32a4205a1ab669e44656fbc2171d95ab1506b3237764aa65c"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp",
+      "base_sha256": "4fec81297ccb7ed72ac24575ba4db3e0cf2d2631c511b423532746c63305ad45",
+      "overlay_sha256": "1193f4922c1afd2a873239f299f8ce50b6759270186684b4bb378a0c3ba54a2c"
     },
     {
       "path": "include/llama.h",

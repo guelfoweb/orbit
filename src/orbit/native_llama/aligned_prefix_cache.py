@@ -29,6 +29,23 @@ def qualified_config(config: Any) -> bool:
             )))
 
 
+def gpu_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    env = os.environ if environ is None else environ
+    return enabled(env) and env.get("ORBIT_GPU_ALIGNED_PREFIX_REUSE", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def gpu_config(config: Any) -> bool:
+    values = ("context_tokens", "threads", "threads_batch", "batch_size", "ubatch_size", "progress_step")
+    return (tuple(getattr(config, key, None) for key in values) == (8192, 1, 1, 256, 128, 64)
+            and getattr(config, "use_extra_bufts", None) is False
+            and getattr(config, "gpu_layers", None) == -1
+            and getattr(config, "low_memory", None) is False
+            and all(getattr(config, name, None) is False for name in (
+                "use_mtp_experimental", "mtp_probe_enabled", "mtp_dry_run_enabled",
+                "mtp_accept_probe_enabled", "mtp_decode_probe_enabled", "moe_expert_usage_enabled",
+            )))
+
+
 @dataclass(frozen=True)
 class Snapshot:
     identity: str
